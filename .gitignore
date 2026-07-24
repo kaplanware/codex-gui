@@ -1,0 +1,19 @@
+# Go
+/build/bin/
+/coverage.out
+
+# Frontend
+/frontend/node_modules/
+/frontend/dist/*
+!/frontend/dist/.gitkeep
+*.tsbuildinfo
+
+# Wails generated bindings
+/frontend/wailsjs/
+
+# Editors and local files
+.idea/
+.vscode/
+*.swp
+*.log
+.DS_Store
