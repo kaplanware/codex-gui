@@ -45,7 +45,9 @@ body {
 }
 
 button,
-textarea {
+textarea,
+select,
+input {
   color: inherit;
   font: inherit;
 }
@@ -134,10 +136,18 @@ pre {
 }
 
 .connection-chip,
-.account-chip {
+.account-chip,
+.usage-chip {
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--panel);
+}
+
+.usage-chip {
+  border: 1px solid rgba(124, 228, 189, 0.28);
+  padding: 7px 10px;
+  color: var(--accent);
+  font-size: 0.7rem;
 }
 
 .connection-chip {
@@ -236,7 +246,7 @@ pre {
   gap: 3px;
 }
 
-.project-row,
+.project-main,
 .thread-row {
   display: flex;
   width: 100%;
@@ -249,11 +259,59 @@ pre {
   background: transparent;
 }
 
-.project-row:hover,
+.project-main:hover,
 .thread-row:hover,
 .project-row.active,
 .thread-row.active {
   background: var(--panel-3);
+}
+
+.project-group {
+  display: grid;
+  gap: 2px;
+}
+
+.project-row {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) 25px;
+  align-items: center;
+  border-radius: 8px;
+}
+
+.project-main {
+  padding: 7px 3px;
+}
+
+.collapse-button,
+.project-action {
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+}
+
+.project-action {
+  color: var(--accent);
+}
+
+.nested-threads {
+  display: grid;
+  gap: 2px;
+  margin: 0 0 5px 27px;
+  border-left: 1px solid var(--border);
+  padding-left: 7px;
+}
+
+.nested-threads .thread-row {
+  padding: 7px 9px;
+}
+
+.import-thread {
+  border: 0;
+  padding: 6px 9px;
+  color: var(--muted);
+  text-align: left;
+  background: transparent;
+  font-size: 0.65rem;
 }
 
 .project-icon {
@@ -351,6 +409,12 @@ pre {
 .changes-heading h2 {
   margin-bottom: 0;
   font-size: 0.95rem;
+}
+
+.title-actions {
+  display: flex;
+  align-items: center;
+  gap: 9px;
 }
 
 .working-label {
@@ -453,6 +517,16 @@ pre {
   line-height: 1.6;
 }
 
+.file-link {
+  display: inline;
+  border: 0;
+  padding: 0;
+  color: var(--accent);
+  background: transparent;
+  font-family: inherit;
+  text-decoration: underline;
+}
+
 .composer {
   margin: 0 clamp(15px, 4vw, 42px) 17px;
   border: 1px solid var(--border);
@@ -477,6 +551,73 @@ pre {
   color: #737e8e;
 }
 
+.file-picker {
+  position: absolute;
+  z-index: 10;
+  display: grid;
+  width: min(520px, calc(100% - 20px));
+  max-height: 230px;
+  transform: translateY(calc(-100% - 48px));
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 5px;
+  background: var(--panel-2);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.4);
+}
+
+.file-picker button {
+  display: grid;
+  gap: 2px;
+  border: 0;
+  border-radius: 7px;
+  padding: 8px;
+  text-align: left;
+  background: transparent;
+}
+
+.file-picker button:hover {
+  background: var(--panel-3);
+}
+
+.file-picker small {
+  color: var(--muted);
+}
+
+.mention-list,
+.turn-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mention-list {
+  margin: 5px 4px;
+}
+
+.mention-list button {
+  border: 1px solid rgba(124, 228, 189, 0.25);
+  border-radius: 999px;
+  padding: 4px 7px;
+  color: var(--accent);
+  background: rgba(124, 228, 189, 0.06);
+  font-size: 0.64rem;
+}
+
+.turn-controls {
+  margin: 5px 4px 0;
+}
+
+.turn-controls select {
+  min-width: 110px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 5px 7px;
+  color: var(--muted);
+  background: var(--panel);
+  font-size: 0.65rem;
+}
+
 .composer-footer {
   margin-top: 7px;
 }
@@ -484,6 +625,17 @@ pre {
 .composer-footer span {
   color: var(--muted);
   font-size: 0.62rem;
+}
+
+.composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.queue-count {
+  color: var(--accent);
+  font-weight: 750;
 }
 
 .send-button,
@@ -575,6 +727,53 @@ pre {
 .approval-actions {
   display: flex;
   gap: 9px;
+}
+
+.interaction-card {
+  max-height: 85vh;
+  overflow: auto;
+}
+
+.question-block {
+  display: grid;
+  gap: 8px;
+  margin: 16px 0;
+}
+
+.question-block > p {
+  color: var(--muted);
+}
+
+.question-block label {
+  display: flex;
+  gap: 9px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 10px;
+}
+
+.question-block label span {
+  display: grid;
+  gap: 3px;
+}
+
+.question-block small,
+.field-label small {
+  color: var(--muted);
+}
+
+.question-block > input,
+.field-label input {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px;
+  background: var(--panel);
+}
+
+.field-label {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
 }
 
 .device-code {

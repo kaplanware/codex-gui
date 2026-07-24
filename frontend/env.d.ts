@@ -10,6 +10,8 @@ declare global {
           StartCodex(): Promise<void>
           RestartCodex(): Promise<void>
           GetAccount(): Promise<unknown>
+          GetRateLimits(): Promise<unknown>
+          ListModels(): Promise<unknown>
           LoginWithChatGPT(): Promise<unknown>
           LoginWithDeviceCode(): Promise<unknown>
           Logout(): Promise<void>
@@ -21,8 +23,17 @@ declare global {
           StartThread(projectId: string): Promise<unknown>
           ResumeThread(threadId: string): Promise<unknown>
           SendMessage(threadId: string, text: string): Promise<unknown>
+          SendMessageWithOptions(threadId: string, text: string, options: unknown): Promise<unknown>
+          SearchProjectFiles(projectId: string, query: string): Promise<unknown>
+          OpenFile(path: string): Promise<void>
+          OpenProjectFile(projectId: string, relativePath: string): Promise<void>
+          ExportThread(threadId: string): Promise<string>
+          ImportThread(projectId: string): Promise<unknown>
           InterruptTurn(threadId: string, turnId: string): Promise<void>
           RespondToApproval(decision: unknown): Promise<void>
+          RespondToPermission(requestId: string, permissions: unknown, scope: string): Promise<void>
+          RespondToUserInput(requestId: string, answers: unknown): Promise<void>
+          RespondToElicitation(requestId: string, action: string, content: unknown): Promise<void>
           OpenInFileManager(path: string): Promise<void>
         }
       }

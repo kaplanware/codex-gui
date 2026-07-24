@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -106,6 +108,54 @@ type TurnStart struct {
 	Status   string `json:"status"`
 }
 
+type ModelView struct {
+	ID                        string   `json:"id"`
+	DisplayName               string   `json:"displayName"`
+	Description               string   `json:"description"`
+	IsDefault                 bool     `json:"isDefault"`
+	DefaultReasoningEffort    string   `json:"defaultReasoningEffort"`
+	SupportedReasoningEfforts []string `json:"supportedReasoningEfforts"`
+}
+
+type RateLimitWindow struct {
+	UsedPercent        float64 `json:"usedPercent"`
+	RemainingPercent   float64 `json:"remainingPercent"`
+	ResetsAt           int64   `json:"resetsAt,omitempty"`
+	WindowDurationMins int64   `json:"windowDurationMins,omitempty"`
+}
+
+type RateLimitsView struct {
+	LimitName string           `json:"limitName,omitempty"`
+	Primary   *RateLimitWindow `json:"primary,omitempty"`
+	Secondary *RateLimitWindow `json:"secondary,omitempty"`
+}
+
+type FileMatch struct {
+	Name         string `json:"name"`
+	Path         string `json:"path"`
+	RelativePath string `json:"relativePath"`
+	Score        int64  `json:"score"`
+}
+
+type MentionInput struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+type TurnOptions struct {
+	Model    string         `json:"model,omitempty"`
+	Effort   string         `json:"effort,omitempty"`
+	Mode     string         `json:"mode,omitempty"`
+	Mentions []MentionInput `json:"mentions,omitempty"`
+}
+
+type ChatArchive struct {
+	Version    int    `json:"version"`
+	ExportedAt string `json:"exportedAt"`
+	Title      string `json:"title"`
+	Items      []any  `json:"items"`
+}
+
 type ApprovalDecision struct {
 	RequestID string `json:"requestId"`
 	Kind      string `json:"kind"`
@@ -137,6 +187,73 @@ func (a *App) GetAccount() (AccountView, error) {
 	view.Email = account.Email
 	view.PlanType = account.PlanType
 	return view, nil
+}
+
+func (a *App) GetRateLimits() (RateLimitsView, error) {
+	var response struct {
+		RateLimits struct {
+			LimitName string `json:"limitName"`
+			Primary   *struct {
+				UsedPercent        float64 `json:"usedPercent"`
+				ResetsAt           *int64  `json:"resetsAt"`
+				WindowDurationMins *int64  `json:"windowDurationMins"`
+			} `json:"primary"`
+			Secondary *struct {
+				UsedPercent        float64 `json:"usedPercent"`
+				ResetsAt           *int64  `json:"resetsAt"`
+				WindowDurationMins *int64  `json:"windowDurationMins"`
+			} `json:"secondary"`
+		} `json:"rateLimits"`
+	}
+	if err := a.call("account/rateLimits/read", nil, &response); err != nil {
+		return RateLimitsView{}, err
+	}
+	view := RateLimitsView{LimitName: response.RateLimits.LimitName}
+	if response.RateLimits.Primary != nil {
+		view.Primary = rateLimitWindow(
+			response.RateLimits.Primary.UsedPercent,
+			response.RateLimits.Primary.ResetsAt,
+			response.RateLimits.Primary.WindowDurationMins,
+		)
+	}
+	if response.RateLimits.Secondary != nil {
+		view.Secondary = rateLimitWindow(
+			response.RateLimits.Secondary.UsedPercent,
+			response.RateLimits.Secondary.ResetsAt,
+			response.RateLimits.Secondary.WindowDurationMins,
+		)
+	}
+	return view, nil
+}
+
+func (a *App) ListModels() ([]ModelView, error) {
+	var response struct {
+		Data []struct {
+			ID                        string `json:"id"`
+			DisplayName               string `json:"displayName"`
+			Description               string `json:"description"`
+			IsDefault                 bool   `json:"isDefault"`
+			DefaultReasoningEffort    string `json:"defaultReasoningEffort"`
+			SupportedReasoningEfforts []struct {
+				ReasoningEffort string `json:"reasoningEffort"`
+			} `json:"supportedReasoningEfforts"`
+		} `json:"data"`
+	}
+	if err := a.call("model/list", map[string]any{"limit": 100, "includeHidden": false}, &response); err != nil {
+		return nil, err
+	}
+	models := make([]ModelView, 0, len(response.Data))
+	for _, model := range response.Data {
+		view := ModelView{
+			ID: model.ID, DisplayName: model.DisplayName, Description: model.Description,
+			IsDefault: model.IsDefault, DefaultReasoningEffort: model.DefaultReasoningEffort,
+		}
+		for _, effort := range model.SupportedReasoningEfforts {
+			view.SupportedReasoningEfforts = append(view.SupportedReasoningEfforts, effort.ReasoningEffort)
+		}
+		models = append(models, view)
+	}
+	return models, nil
 }
 
 func (a *App) LoginWithChatGPT() (LoginStart, error) {
@@ -279,6 +396,10 @@ func (a *App) ResumeThread(threadID string) (ThreadView, error) {
 }
 
 func (a *App) SendMessage(threadID, text string) (TurnStart, error) {
+	return a.SendMessageWithOptions(threadID, text, TurnOptions{})
+}
+
+func (a *App) SendMessageWithOptions(threadID, text string, options TurnOptions) (TurnStart, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return TurnStart{}, errors.New("message cannot be empty")
@@ -293,12 +414,41 @@ func (a *App) SendMessage(threadID, text string) (TurnStart, error) {
 			Status string `json:"status"`
 		} `json:"turn"`
 	}
-	err = a.call("turn/start", map[string]any{
+	input := []map[string]any{{
+		"type": "text", "text": text, "text_elements": []any{},
+	}}
+	for _, mention := range options.Mentions {
+		if mention.Path == "" {
+			continue
+		}
+		input = append(input, map[string]any{
+			"type": "mention", "name": mention.Name, "path": mention.Path,
+		})
+	}
+	params := map[string]any{
 		"threadId": threadID,
-		"input": []map[string]any{{
-			"type": "text", "text": text, "text_elements": []any{},
-		}},
-	}, &response)
+		"input":    input,
+	}
+	if options.Model != "" {
+		params["model"] = options.Model
+	}
+	if options.Effort != "" {
+		params["effort"] = options.Effort
+	}
+	if options.Mode == "plan" || options.Mode == "default" {
+		model := options.Model
+		if model == "" {
+			model = "default"
+		}
+		params["collaborationMode"] = map[string]any{
+			"mode": options.Mode,
+			"settings": map[string]any{
+				"model": model, "reasoning_effort": nullIfEmptyString(options.Effort),
+				"developer_instructions": nil,
+			},
+		}
+	}
+	err = a.call("turn/start", params, &response)
 	if err != nil {
 		return TurnStart{}, err
 	}
@@ -312,6 +462,190 @@ func (a *App) SendMessage(threadID, text string) (TurnStart, error) {
 	return TurnStart{ThreadID: threadID, TurnID: response.Turn.ID, Status: response.Turn.Status}, nil
 }
 
+func (a *App) SearchProjectFiles(projectID, query string) ([]FileMatch, error) {
+	if err := a.requireDatabase(); err != nil {
+		return nil, err
+	}
+	project, err := a.projects.Get(context.Background(), projectID)
+	if err != nil {
+		return nil, err
+	}
+	var response struct {
+		Files []struct {
+			Root     string `json:"root"`
+			Path     string `json:"path"`
+			FileName string `json:"file_name"`
+			Score    int64  `json:"score"`
+		} `json:"files"`
+	}
+	if err := a.call("fuzzyFileSearch", map[string]any{
+		"query": query, "roots": []string{project.CanonicalPath}, "cancellationToken": nil,
+	}, &response); err != nil {
+		return nil, err
+	}
+	matches := make([]FileMatch, 0, len(response.Files))
+	for _, file := range response.Files {
+		relative, err := filepath.Rel(project.CanonicalPath, file.Path)
+		if err != nil || strings.HasPrefix(relative, "..") {
+			continue
+		}
+		matches = append(matches, FileMatch{
+			Name: file.FileName, Path: file.Path, RelativePath: filepath.ToSlash(relative), Score: file.Score,
+		})
+	}
+	sort.SliceStable(matches, func(i, j int) bool { return matches[i].Score > matches[j].Score })
+	if len(matches) > 20 {
+		matches = matches[:20]
+	}
+	return matches, nil
+}
+
+func (a *App) OpenFile(path string) error {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	runtime.BrowserOpenURL(a.ctx, (&url.URL{Scheme: "file", Path: absolute}).String())
+	return nil
+}
+
+func (a *App) OpenProjectFile(projectID, relativePath string) error {
+	project, err := a.projects.Get(context.Background(), projectID)
+	if err != nil {
+		return err
+	}
+	root := filepath.Clean(project.CanonicalPath)
+	target := filepath.Clean(filepath.Join(root, filepath.FromSlash(relativePath)))
+	relative, err := filepath.Rel(root, target)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return errors.New("file is outside the selected project")
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return errors.New("path is not a file")
+	}
+	runtime.BrowserOpenURL(a.ctx, (&url.URL{Scheme: "file", Path: target}).String())
+	return nil
+}
+
+func (a *App) ExportThread(threadID string) (string, error) {
+	thread, err := a.store.GetThread(context.Background(), threadID)
+	if err != nil {
+		return "", err
+	}
+	var response struct {
+		Thread struct {
+			Turns []struct {
+				Items []any `json:"items"`
+			} `json:"turns"`
+		} `json:"thread"`
+	}
+	if err := a.call("thread/read", map[string]any{
+		"threadId": threadID, "includeTurns": true,
+	}, &response); err != nil {
+		return "", err
+	}
+	archive := ChatArchive{
+		Version: 1, ExportedAt: time.Now().UTC().Format(time.RFC3339Nano), Title: thread.Title,
+	}
+	for _, turn := range response.Thread.Turns {
+		archive.Items = append(archive.Items, turn.Items...)
+	}
+	data, err := json.MarshalIndent(archive, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	defaultName := sanitizeFilename(thread.Title)
+	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title: "Export Codex chat", DefaultFilename: defaultName + ".codex-chat.json",
+		Filters: []runtime.FileFilter{{DisplayName: "Codex Chat Archive", Pattern: "*.codex-chat.json"}},
+	})
+	if err != nil || path == "" {
+		return "", err
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func (a *App) ImportThread(projectID string) (ThreadView, error) {
+	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title:   "Import Codex chat",
+		Filters: []runtime.FileFilter{{DisplayName: "Codex Chat Archive", Pattern: "*.codex-chat.json"}},
+	})
+	if err != nil || path == "" {
+		return ThreadView{}, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return ThreadView{}, err
+	}
+	if info.Size() > 20*1024*1024 {
+		return ThreadView{}, errors.New("chat archive exceeds the 20 MiB import limit")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ThreadView{}, err
+	}
+	var archive ChatArchive
+	if err := json.Unmarshal(data, &archive); err != nil {
+		return ThreadView{}, fmt.Errorf("invalid chat archive: %w", err)
+	}
+	if archive.Version != 1 {
+		return ThreadView{}, fmt.Errorf("unsupported chat archive version %d", archive.Version)
+	}
+	view, err := a.StartThread(projectID)
+	if err != nil {
+		return ThreadView{}, err
+	}
+	responseItems := make([]any, 0, len(archive.Items))
+	for _, rawItem := range archive.Items {
+		item, ok := rawItem.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch item["type"] {
+		case "userMessage":
+			text := extractUserMessageText(item)
+			if text != "" {
+				responseItems = append(responseItems, map[string]any{
+					"type": "message", "role": "user",
+					"content": []any{map[string]any{"type": "input_text", "text": text}},
+				})
+			}
+		case "agentMessage":
+			text, _ := item["text"].(string)
+			if text != "" {
+				responseItems = append(responseItems, map[string]any{
+					"type": "message", "role": "assistant",
+					"content": []any{map[string]any{"type": "output_text", "text": text}},
+				})
+			}
+		}
+	}
+	if len(responseItems) > 0 {
+		if err := a.call("thread/inject_items", map[string]any{
+			"threadId": view.ID, "items": responseItems,
+		}, nil); err != nil {
+			return ThreadView{}, err
+		}
+	}
+	title := strings.TrimSpace(archive.Title)
+	if title == "" {
+		title = "Imported chat"
+	} else {
+		title = "Imported: " + title
+	}
+	_ = a.store.UpdateThreadTitle(context.Background(), view.ID, title)
+	view.Title = title
+	view.Items = archive.Items
+	return view, nil
+}
+
 func (a *App) InterruptTurn(threadID, turnID string) error {
 	return a.call("turn/interrupt", map[string]any{"threadId": threadID, "turnId": turnID}, nil)
 }
@@ -323,13 +657,52 @@ func (a *App) RespondToApproval(decision ApprovalDecision) error {
 		return errors.New("unsupported approval decision")
 	}
 	switch decision.Kind {
-	case "command":
+	case "command", "file":
 		return a.manager.Respond(decision.RequestID, map[string]any{"decision": decision.Decision})
-	case "file":
-		return a.manager.Respond(decision.RequestID, map[string]any{"decision": decision.Decision})
+	case "permissions":
+		if decision.Decision == "accept" || decision.Decision == "acceptForSession" {
+			return errors.New("permission approvals require the requested permission payload")
+		}
+		return a.manager.Respond(decision.RequestID, map[string]any{
+			"permissions": map[string]any{}, "scope": "turn",
+		})
 	default:
 		return errors.New("unsupported approval kind")
 	}
+}
+
+func (a *App) RespondToPermission(
+	requestID string,
+	permissions map[string]any,
+	scope string,
+) error {
+	if scope != "turn" && scope != "session" {
+		return errors.New("invalid permission scope")
+	}
+	return a.manager.Respond(requestID, map[string]any{
+		"permissions": permissions, "scope": scope,
+	})
+}
+
+func (a *App) RespondToUserInput(requestID string, answers map[string][]string) error {
+	result := make(map[string]any, len(answers))
+	for id, values := range answers {
+		result[id] = map[string]any{"answers": values}
+	}
+	return a.manager.Respond(requestID, map[string]any{"answers": result})
+}
+
+func (a *App) RespondToElicitation(requestID, action string, content map[string]any) error {
+	if action != "accept" && action != "decline" && action != "cancel" {
+		return errors.New("invalid elicitation action")
+	}
+	var responseContent any
+	if action == "accept" {
+		responseContent = content
+	}
+	return a.manager.Respond(requestID, map[string]any{
+		"action": action, "content": responseContent, "_meta": nil,
+	})
 }
 
 func (a *App) OpenInFileManager(path string) error {
@@ -394,6 +767,8 @@ func (a *App) handleProtocolMessage(method string, id, params []byte) {
 	switch method {
 	case "account/updated":
 		emit("codex:account-updated", payload)
+	case "account/rateLimits/updated":
+		emit("codex:rate-limits-updated", payload)
 	case "account/login/completed":
 		emit("codex:login-completed", payload)
 	case "thread/started", "thread/name/updated":
@@ -414,6 +789,16 @@ func (a *App) handleProtocolMessage(method string, id, params []byte) {
 		emit("codex:approval-requested", approvalPayload("command", id, payload))
 	case "item/fileChange/requestApproval":
 		emit("codex:approval-requested", approvalPayload("file", id, payload))
+	case "item/permissions/requestApproval":
+		emit("codex:approval-requested", approvalPayload("permissions", id, payload))
+	case "item/tool/requestUserInput":
+		emit("codex:user-input-requested", map[string]any{
+			"requestId": string(id), "details": payload,
+		})
+	case "mcpServer/elicitation/request":
+		emit("codex:elicitation-requested", map[string]any{
+			"requestId": string(id), "details": payload,
+		})
 	}
 }
 
@@ -421,4 +806,55 @@ func approvalPayload(kind string, id []byte, payload any) map[string]any {
 	return map[string]any{
 		"kind": kind, "requestId": string(id), "details": payload,
 	}
+}
+
+func rateLimitWindow(used float64, resetsAt, duration *int64) *RateLimitWindow {
+	window := &RateLimitWindow{
+		UsedPercent: used, RemainingPercent: max(0, 100-used),
+	}
+	if resetsAt != nil {
+		window.ResetsAt = *resetsAt
+	}
+	if duration != nil {
+		window.WindowDurationMins = *duration
+	}
+	return window
+}
+
+func nullIfEmptyString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func extractUserMessageText(item map[string]any) string {
+	content, _ := item["content"].([]any)
+	var parts []string
+	for _, entry := range content {
+		value, ok := entry.(map[string]any)
+		if !ok || value["type"] != "text" {
+			continue
+		}
+		if text, ok := value["text"].(string); ok {
+			parts = append(parts, text)
+		}
+	}
+	if text, ok := item["text"].(string); ok && text != "" {
+		parts = append(parts, text)
+	}
+	return strings.Join(parts, "\n")
+}
+
+func sanitizeFilename(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "codex-chat"
+	}
+	replacer := strings.NewReplacer("/", "-", "\\", "-", ":", "-", "\x00", "")
+	value = replacer.Replace(value)
+	if len([]rune(value)) > 80 {
+		value = string([]rune(value)[:80])
+	}
+	return value
 }

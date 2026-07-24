@@ -99,7 +99,7 @@ func (m *Manager) start(ctx context.Context) error {
 	m.transition(StateInitializing, nil)
 	err = client.Start(ctx, installation.Path, ClientInfo{
 		Name: "linux_codex_desktop", Title: "Linux Codex Desktop", Version: "0.1.0-alpha.1",
-	})
+	}, map[string]any{"experimentalApi": true})
 	if err != nil {
 		appErr := &AppError{
 			Code: ErrCodexStartFailed, Summary: "Could not initialize Codex app-server",

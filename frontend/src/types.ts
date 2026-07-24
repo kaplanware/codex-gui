@@ -67,6 +67,47 @@ export interface Account {
   requiresOpenaiAuth: boolean
 }
 
+export interface RateLimitWindow {
+  usedPercent: number
+  remainingPercent: number
+  resetsAt?: number
+  windowDurationMins?: number
+}
+
+export interface RateLimits {
+  limitName?: string
+  primary?: RateLimitWindow
+  secondary?: RateLimitWindow
+}
+
+export interface Model {
+  id: string
+  displayName: string
+  description: string
+  isDefault: boolean
+  defaultReasoningEffort: string
+  supportedReasoningEfforts: string[]
+}
+
+export interface FileMatch {
+  name: string
+  path: string
+  relativePath: string
+  score: number
+}
+
+export interface MentionInput {
+  name: string
+  path: string
+}
+
+export interface TurnOptions {
+  model?: string
+  effort?: string
+  mode?: 'default' | 'plan'
+  mentions?: MentionInput[]
+}
+
 export interface LoginStart {
   type: string
   loginId: string
@@ -117,7 +158,7 @@ export interface ConversationItem {
 
 export interface Approval {
   requestId: string
-  kind: 'command' | 'file'
+  kind: 'command' | 'file' | 'permissions'
   details: {
     itemId: string
     threadId: string
@@ -126,5 +167,35 @@ export interface Approval {
     cwd?: string
     reason?: string
     grantRoot?: string
+    permissions?: Record<string, unknown>
+  }
+}
+
+export interface UserInputQuestion {
+  id: string
+  header: string
+  question: string
+  isOther: boolean
+  isSecret: boolean
+  options: Array<{ label: string; description: string }> | null
+}
+
+export interface UserInputRequest {
+  requestId: string
+  details: {
+    questions: UserInputQuestion[]
+  }
+}
+
+export interface ElicitationRequest {
+  requestId: string
+  details: {
+    mode: string
+    message: string
+    url?: string
+    requestedSchema?: {
+      properties?: Record<string, { title?: string; description?: string; type?: string }>
+      required?: string[]
+    }
   }
 }

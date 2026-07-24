@@ -1,6 +1,6 @@
 # Linux Codex Desktop — Development Documentation
 
-> **Status:** Milestones 0–1 implementation baseline  
+> **Status:** Milestones 0–2 usable desktop workspace
 > **Target:** Linux-first desktop client for OpenAI Codex  
 > **Primary development environment:** CachyOS / Arch Linux  
 > **Distribution goal:** Major glibc-based Linux distributions  
@@ -71,6 +71,21 @@ The first versions will **not**:
 - Attempt feature parity with every official Codex client immediately
 
 The application should remain a local client around the official Codex runtime.
+
+### Current workspace capabilities
+
+- Local projects with collapsible, project-scoped thread trees
+- Streaming Codex conversations with back-to-back message queuing
+- Model, reasoning-effort and default/plan collaboration controls
+- `@` file search, structured file mentions and safe project-local file links
+- Command, file, permission, user-input and MCP elicitation workflows
+- Primary and secondary account usage-limit visibility
+- Local JSON chat export/import
+- Unified turn diff and interruption controls
+
+Plan mode and the richer interactive request types use the app-server
+experimental API capability. The transport remains local stdio; no experimental
+WebSocket transport is enabled.
 
 ---
 

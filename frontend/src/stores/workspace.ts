@@ -1,7 +1,21 @@
 import { defineStore } from 'pinia'
 
 import { backend, subscribe } from '../backend'
-import type { Account, Approval, ConversationItem, Project, Thread, TurnStart } from '../types'
+import type {
+  Account,
+  Approval,
+  ConversationItem,
+  ElicitationRequest,
+  FileMatch,
+  MentionInput,
+  Model,
+  Project,
+  RateLimits,
+  Thread,
+  TurnOptions,
+  TurnStart,
+  UserInputRequest,
+} from '../types'
 
 interface ItemEnvelope {
   event: string
@@ -12,35 +26,62 @@ interface ItemEnvelope {
   }
 }
 
+interface QueuedMessage {
+  id: string
+  text: string
+  options: TurnOptions
+}
+
 export const useWorkspaceStore = defineStore('workspace', {
   state: () => ({
     account: null as Account | null,
+    rateLimits: null as RateLimits | null,
+    models: [] as Model[],
+    selectedModel: '',
+    selectedEffort: '',
+    selectedMode: 'default' as 'default' | 'plan',
     projects: [] as Project[],
-    threads: [] as Thread[],
+    threadsByProject: {} as Record<string, Thread[]>,
+    expandedProjects: {} as Record<string, boolean>,
     activeProject: null as Project | null,
     activeThread: null as Thread | null,
     activeTurn: null as TurnStart | null,
     items: [] as ConversationItem[],
     diff: '',
     approvals: [] as Approval[],
+    userInputRequests: [] as UserInputRequest[],
+    elicitations: [] as ElicitationRequest[],
+    queue: [] as QueuedMessage[],
+    fileMatches: [] as FileMatch[],
+    mentions: [] as MentionInput[],
     deviceLogin: null as { verificationUrl: string; userCode: string } | null,
     busy: false,
     sending: false,
+    searchingFiles: false,
     error: '',
     unsubscribers: [] as Array<() => void>,
   }),
   getters: {
     currentApproval: (state) => state.approvals[0] ?? null,
+    currentUserInput: (state) => state.userInputRequests[0] ?? null,
+    currentElicitation: (state) => state.elicitations[0] ?? null,
+    threads: (state) =>
+      state.activeProject ? (state.threadsByProject[state.activeProject.id] ?? []) : [],
+    currentModel: (state) => state.models.find((model) => model.id === state.selectedModel),
+    supportedEfforts(): string[] {
+      return this.currentModel?.supportedReasoningEfforts ?? []
+    },
   },
   actions: {
     async initialize() {
       this.connectEvents()
-      await Promise.all([this.loadAccount(), this.loadProjects()])
+      await Promise.all([this.loadAccount(), this.loadProjects(), this.loadModels()])
     },
     connectEvents() {
       if (this.unsubscribers.length) return
       this.unsubscribers.push(
         subscribe('codex:account-updated', () => void this.loadAccount()),
+        subscribe('codex:rate-limits-updated', () => void this.loadRateLimits()),
         subscribe('codex:login-completed', (payload) => {
           const result = payload as { success: boolean; error?: string }
           if (result.success) {
@@ -69,12 +110,19 @@ export const useWorkspaceStore = defineStore('workspace', {
           this.activeTurn = null
           this.sending = false
           if (this.activeProject) void this.loadThreads(this.activeProject.id)
+          void this.drainQueue()
         }),
         subscribe('codex:diff-updated', (payload) => {
           this.diff = (payload as { diff: string }).diff
         }),
         subscribe('codex:approval-requested', (payload) => {
           this.approvals.push(payload as Approval)
+        }),
+        subscribe('codex:user-input-requested', (payload) => {
+          this.userInputRequests.push(payload as UserInputRequest)
+        }),
+        subscribe('codex:elicitation-requested', (payload) => {
+          this.elicitations.push(payload as ElicitationRequest)
         }),
       )
     },
@@ -84,14 +132,36 @@ export const useWorkspaceStore = defineStore('workspace', {
     async loadAccount() {
       try {
         this.account = await backend.getAccount()
+        if (this.account.signedIn) await this.loadRateLimits()
       } catch (error) {
         this.error = message(error)
       }
     },
+    async loadRateLimits() {
+      try {
+        this.rateLimits = await backend.getRateLimits()
+      } catch {
+        this.rateLimits = null
+      }
+    },
+    async loadModels() {
+      try {
+        this.models = await backend.listModels()
+        const defaultModel = this.models.find((model) => model.isDefault) ?? this.models[0]
+        if (!this.selectedModel && defaultModel) this.setModel(defaultModel.id)
+      } catch (error) {
+        this.error = message(error)
+      }
+    },
+    setModel(id: string) {
+      this.selectedModel = id
+      const model = this.models.find((candidate) => candidate.id === id)
+      if (model && !model.supportedReasoningEfforts.includes(this.selectedEffort)) {
+        this.selectedEffort = model.defaultReasoningEffort
+      }
+    },
     async login() {
-      await this.run(async () => {
-        await backend.loginWithChatGPT()
-      })
+      await this.run(async () => void (await backend.loginWithChatGPT()))
     },
     async loginWithDeviceCode() {
       await this.run(async () => {
@@ -106,6 +176,7 @@ export const useWorkspaceStore = defineStore('workspace', {
       await this.run(async () => {
         await backend.logout()
         this.account = { signedIn: false, requiresOpenaiAuth: true }
+        this.rateLimits = null
       })
     },
     async loadProjects() {
@@ -126,58 +197,131 @@ export const useWorkspaceStore = defineStore('workspace', {
     async removeProject(project: Project) {
       await this.run(async () => {
         await backend.removeProject(project.id)
+        delete this.threadsByProject[project.id]
         if (this.activeProject?.id === project.id) {
           this.activeProject = null
           this.activeThread = null
-          this.threads = []
           this.items = []
         }
         await this.loadProjects()
       })
     },
+    async toggleProject(project: Project) {
+      const willExpand = !this.expandedProjects[project.id]
+      this.expandedProjects[project.id] = willExpand
+      if (willExpand) {
+        this.activeProject = project
+        await this.loadThreads(project.id)
+      }
+    },
     async selectProject(project: Project) {
       this.activeProject = project
+      this.expandedProjects[project.id] = true
       this.activeThread = null
       this.items = []
       this.diff = ''
+      this.queue = []
       await this.loadThreads(project.id)
     },
     async loadThreads(projectId: string) {
-      this.threads = await backend.listThreads(projectId)
-      const updatedActive = this.threads.find((thread) => thread.id === this.activeThread?.id)
+      this.threadsByProject[projectId] = await backend.listThreads(projectId)
+      const updatedActive = this.threadsByProject[projectId].find(
+        (thread) => thread.id === this.activeThread?.id,
+      )
       if (updatedActive) this.activeThread = updatedActive
     },
-    async newThread() {
-      if (!this.activeProject) return
+    async newThread(project?: Project | null) {
+      project ??= this.activeProject
+      if (!project) return
       await this.run(async () => {
-        const thread = await backend.startThread(this.activeProject!.id)
-        await this.loadThreads(this.activeProject!.id)
+        this.activeProject = project
+        this.expandedProjects[project.id] = true
+        const thread = await backend.startThread(project.id)
+        await this.loadThreads(project.id)
         await this.selectThread(thread, false)
       })
     },
     async selectThread(thread: Thread, resume = true) {
       await this.run(async () => {
+        const project = this.projects.find((candidate) => candidate.id === thread.projectId)
+        if (project) {
+          this.activeProject = project
+          this.expandedProjects[project.id] = true
+        }
         this.activeThread = resume ? await backend.resumeThread(thread.id) : thread
         this.items = this.activeThread.items ?? []
         this.diff = ''
         this.activeTurn = null
+        this.queue = []
+        this.mentions = []
+      })
+    },
+    async exportActiveThread() {
+      if (!this.activeThread) return
+      await this.run(async () => {
+        await backend.exportThread(this.activeThread!.id)
+      })
+    },
+    async importThread(project?: Project | null) {
+      project ??= this.activeProject
+      if (!project) return
+      await this.run(async () => {
+        const thread = await backend.importThread(project.id)
+        this.activeProject = project
+        this.expandedProjects[project.id] = true
+        await this.loadThreads(project.id)
+        await this.selectThread(thread, false)
       })
     },
     async send(text: string) {
       if (!this.activeThread || !text.trim()) return
+      const entry: QueuedMessage = {
+        id: `local-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        text: text.trim(),
+        options: {
+          model: this.selectedModel,
+          effort: this.selectedEffort,
+          mode: this.selectedMode,
+          mentions: [...this.mentions],
+        },
+      }
+      this.mentions = []
+      this.items.push({
+        id: entry.id,
+        type: 'userMessage',
+        text: entry.text,
+        status: this.activeTurn || this.sending ? 'queued' : 'sending',
+      })
+      if (this.activeTurn || this.sending) {
+        this.queue.push(entry)
+        return
+      }
+      await this.sendNow(entry)
+    },
+    async sendNow(entry: QueuedMessage) {
+      if (!this.activeThread) return
       this.sending = true
       this.error = ''
-      this.items.push({
-        id: `local-${Date.now()}`,
-        type: 'userMessage',
-        text: text.trim(),
-      })
+      const localItem = this.items.find((item) => item.id === entry.id)
+      if (localItem) localItem.status = 'sending'
       try {
-        this.activeTurn = await backend.sendMessage(this.activeThread.id, text)
+        this.activeTurn = await backend.sendMessageWithOptions(
+          this.activeThread.id,
+          entry.text,
+          entry.options,
+        )
+        if (localItem) localItem.status = 'sent'
       } catch (error) {
+        if (localItem) localItem.status = 'failed'
         this.error = message(error)
         this.sending = false
+        await this.drainQueue()
       }
+    },
+    async drainQueue() {
+      if (this.activeTurn || this.sending || !this.queue.length) return
+      const next = this.queue.shift()
+      if (next) await this.sendNow(next)
     },
     async interrupt() {
       if (!this.activeTurn) return
@@ -185,12 +329,63 @@ export const useWorkspaceStore = defineStore('workspace', {
         await backend.interruptTurn(this.activeTurn!.threadId, this.activeTurn!.turnId)
       })
     },
+    async searchFiles(query: string) {
+      if (!this.activeProject) return
+      this.searchingFiles = true
+      try {
+        this.fileMatches = await backend.searchProjectFiles(this.activeProject.id, query)
+      } catch {
+        this.fileMatches = []
+      } finally {
+        this.searchingFiles = false
+      }
+    },
+    addMention(match: FileMatch) {
+      if (!this.mentions.some((mention) => mention.path === match.path)) {
+        this.mentions.push({ name: match.relativePath, path: match.path })
+      }
+      this.fileMatches = []
+    },
+    removeMention(path: string) {
+      this.mentions = this.mentions.filter((mention) => mention.path !== path)
+    },
     async answerApproval(decision: string) {
       const approval = this.currentApproval
       if (!approval) return
       await this.run(async () => {
-        await backend.respondToApproval(approval.requestId, approval.kind, decision)
+        if (approval.kind === 'permissions') {
+          if (decision === 'accept' || decision === 'acceptForSession') {
+            await backend.respondToPermission(
+              approval.requestId,
+              approval.details.permissions ?? {},
+              decision === 'acceptForSession' ? 'session' : 'turn',
+            )
+          } else {
+            await backend.respondToApproval(approval.requestId, approval.kind, decision)
+          }
+        } else {
+          await backend.respondToApproval(approval.requestId, approval.kind, decision)
+        }
         this.approvals.shift()
+      })
+    },
+    async answerUserInput(answers: Record<string, string[]>) {
+      const request = this.currentUserInput
+      if (!request) return
+      await this.run(async () => {
+        await backend.respondToUserInput(request.requestId, answers)
+        this.userInputRequests.shift()
+      })
+    },
+    async answerElicitation(
+      action: 'accept' | 'decline' | 'cancel',
+      content: Record<string, unknown> = {},
+    ) {
+      const request = this.currentElicitation
+      if (!request) return
+      await this.run(async () => {
+        await backend.respondToElicitation(request, action, content)
+        this.elicitations.shift()
       })
     },
     applyItem(envelope: ItemEnvelope) {

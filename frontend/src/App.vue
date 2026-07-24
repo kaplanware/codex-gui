@@ -4,19 +4,30 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { backend } from './backend'
 import { useDiagnosticsStore } from './stores/diagnostics'
 import { useWorkspaceStore } from './stores/workspace'
-import type { ConversationItem } from './types'
+import type { ConversationItem, FileMatch } from './types'
 
 const diagnostics = useDiagnosticsStore()
 const workspace = useWorkspaceStore()
 const prompt = ref('')
 const conversation = ref<HTMLElement | null>(null)
 const showDiagnostics = ref(false)
+const userAnswers = ref<Record<string, string[]>>({})
+const elicitationValues = ref<Record<string, unknown>>({})
+let fileSearchTimer: number | undefined
 
 const connected = computed(() => diagnostics.status?.state === 'ready')
 const needsLogin = computed(
   () => connected.value && workspace.account !== null && !workspace.account.signedIn,
 )
 const statusText = computed(() => diagnostics.status?.state?.replace(/_/g, ' ') ?? 'starting')
+const usageLabel = computed(() => {
+  const limits = workspace.rateLimits
+  if (!limits?.primary) return ''
+  const primary = `${Math.round(limits.primary.remainingPercent)}% left`
+  return limits.secondary
+    ? `${primary} · ${Math.round(limits.secondary.remainingPercent)}% long-term`
+    : primary
+})
 
 onMounted(async () => {
   diagnostics.connectEvents()
@@ -25,6 +36,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  if (fileSearchTimer) globalThis.clearTimeout(fileSearchTimer)
   diagnostics.disconnectEvents()
   workspace.disconnectEvents()
 })
@@ -49,6 +61,49 @@ async function submit() {
   if (!text.trim()) return
   prompt.value = ''
   await workspace.send(text)
+}
+
+function handlePromptInput() {
+  const match = prompt.value.match(/(?:^|\s)@([^\s@]*)$/)
+  if (!match) {
+    workspace.fileMatches = []
+    return
+  }
+  if (fileSearchTimer) globalThis.clearTimeout(fileSearchTimer)
+  fileSearchTimer = globalThis.setTimeout(() => void workspace.searchFiles(match[1] ?? ''), 120)
+}
+
+function selectFile(match: FileMatch) {
+  prompt.value = prompt.value.replace(/(?:^|\s)@[^\s@]*$/, (value) => {
+    const prefix = value.startsWith(' ') ? ' ' : ''
+    return `${prefix}@${match.relativePath} `
+  })
+  workspace.addMention(match)
+}
+
+function messageSegments(text: string) {
+  return text.split(/(@[A-Za-z0-9_./-]+)/g).map((value) => ({
+    value,
+    file: value.startsWith('@') ? value.slice(1) : '',
+  }))
+}
+
+function openLinkedFile(path: string) {
+  if (workspace.activeProject) void backend.openProjectFile(workspace.activeProject.id, path)
+}
+
+function chooseAnswer(questionId: string, value: string) {
+  userAnswers.value[questionId] = [value]
+}
+
+async function submitUserInput() {
+  await workspace.answerUserInput(userAnswers.value)
+  userAnswers.value = {}
+}
+
+async function submitElicitation() {
+  await workspace.answerElicitation('accept', elicitationValues.value)
+  elicitationValues.value = {}
 }
 
 function itemTitle(item: ConversationItem): string {
@@ -103,6 +158,14 @@ function backendOpen(path: string) {
         </div>
       </div>
       <div class="header-actions">
+        <button
+          v-if="usageLabel"
+          class="usage-chip"
+          type="button"
+          @click="workspace.loadRateLimits"
+        >
+          {{ usageLabel }}
+        </button>
         <button class="connection-chip" type="button" @click="showDiagnostics = !showDiagnostics">
           <span class="status-dot" :data-ready="connected"></span>
           {{ statusText }}
@@ -151,41 +214,53 @@ function backendOpen(path: string) {
           <button type="button" title="Add project" @click="workspace.addProject">+</button>
         </div>
         <div class="project-list">
-          <button
-            v-for="project in workspace.projects"
-            :key="project.id"
-            class="project-row"
-            :class="{ active: project.id === workspace.activeProject?.id }"
-            type="button"
-            @click="workspace.selectProject(project)"
-          >
-            <span class="project-icon">{{ project.name.slice(0, 1).toUpperCase() }}</span>
-            <span>
-              <strong>{{ project.name }}</strong>
-              <small>{{
-                project.defaultBranch || (project.isGitRepository ? 'Git repository' : 'Folder')
-              }}</small>
-            </span>
-          </button>
-        </div>
-
-        <div v-if="workspace.activeProject" class="threads-section">
-          <div class="sidebar-heading">
-            <span>Threads</span>
-            <button type="button" title="New thread" @click="workspace.newThread">+</button>
+          <div v-for="project in workspace.projects" :key="project.id" class="project-group">
+            <div
+              class="project-row"
+              :class="{ active: project.id === workspace.activeProject?.id }"
+            >
+              <button
+                class="collapse-button"
+                type="button"
+                @click="workspace.toggleProject(project)"
+              >
+                {{ workspace.expandedProjects[project.id] ? '⌄' : '›' }}
+              </button>
+              <button class="project-main" type="button" @click="workspace.selectProject(project)">
+                <span class="project-icon">{{ project.name.slice(0, 1).toUpperCase() }}</span>
+                <span>
+                  <strong>{{ project.name }}</strong>
+                  <small>{{
+                    project.defaultBranch || (project.isGitRepository ? 'Git repository' : 'Folder')
+                  }}</small>
+                </span>
+              </button>
+              <button
+                class="project-action"
+                type="button"
+                title="New thread"
+                @click="workspace.newThread(project)"
+              >
+                +
+              </button>
+            </div>
+            <div v-if="workspace.expandedProjects[project.id]" class="nested-threads">
+              <button
+                v-for="thread in workspace.threadsByProject[project.id] ?? []"
+                :key="thread.id"
+                class="thread-row"
+                :class="{ active: thread.id === workspace.activeThread?.id }"
+                type="button"
+                @click="workspace.selectThread(thread)"
+              >
+                <strong>{{ thread.title || 'New thread' }}</strong>
+                <small>{{ new Date(thread.updatedAt).toLocaleDateString() }}</small>
+              </button>
+              <button class="import-thread" type="button" @click="workspace.importThread(project)">
+                Import chat…
+              </button>
+            </div>
           </div>
-          <button
-            v-for="thread in workspace.threads"
-            :key="thread.id"
-            class="thread-row"
-            :class="{ active: thread.id === workspace.activeThread?.id }"
-            type="button"
-            @click="workspace.selectThread(thread)"
-          >
-            <strong>{{ thread.title || 'New thread' }}</strong>
-            <small>{{ new Date(thread.updatedAt).toLocaleDateString() }}</small>
-          </button>
-          <p v-if="!workspace.threads.length" class="sidebar-empty">No threads yet.</p>
         </div>
 
         <button
@@ -213,7 +288,7 @@ function backendOpen(path: string) {
           <p>
             Codex will work inside {{ workspace.activeProject.name }} with approval prompts enabled.
           </p>
-          <button class="primary-button" type="button" @click="workspace.newThread">
+          <button class="primary-button" type="button" @click="workspace.newThread()">
             New thread
           </button>
         </div>
@@ -223,7 +298,12 @@ function backendOpen(path: string) {
               <p class="eyebrow">Thread</p>
               <h2>{{ workspace.activeThread.title }}</h2>
             </div>
-            <span v-if="workspace.activeTurn" class="working-label">Codex is working…</span>
+            <div class="title-actions">
+              <span v-if="workspace.activeTurn" class="working-label">Codex is working…</span>
+              <button class="secondary-button" type="button" @click="workspace.exportActiveThread">
+                Export
+              </button>
+            </div>
           </div>
           <div ref="conversation" class="conversation">
             <article
@@ -236,7 +316,12 @@ function backendOpen(path: string) {
                 <strong>{{ itemTitle(item) }}</strong>
                 <span v-if="item.status">{{ item.status }}</span>
               </header>
-              <pre>{{ itemText(item) }}</pre>
+              <pre><template v-for="(segment, index) in messageSegments(itemText(item))" :key="index"><button
+                v-if="segment.file"
+                class="file-link"
+                type="button"
+                @click="openLinkedFile(segment.file)"
+              >{{ segment.value }}</button><template v-else>{{ segment.value }}</template></template></pre>
             </article>
             <div v-if="!workspace.items.length" class="conversation-welcome">
               <span>✦</span>
@@ -249,22 +334,68 @@ function backendOpen(path: string) {
               v-model="prompt"
               rows="3"
               placeholder="Message Codex…"
-              :disabled="workspace.sending"
+              @input="handlePromptInput"
               @keydown.enter.exact.prevent="submit"
             ></textarea>
-            <div class="composer-footer">
-              <span>Enter to send · Shift+Enter for newline</span>
+            <div v-if="workspace.fileMatches.length" class="file-picker">
               <button
-                v-if="workspace.activeTurn"
-                class="stop-button"
+                v-for="match in workspace.fileMatches"
+                :key="match.path"
                 type="button"
-                @click="workspace.interrupt"
+                @click="selectFile(match)"
               >
-                Stop
+                <strong>{{ match.name }}</strong><small>{{ match.relativePath }}</small>
               </button>
-              <button v-else class="send-button" type="submit" :disabled="!prompt.trim()">
-                Send
+            </div>
+            <div v-if="workspace.mentions.length" class="mention-list">
+              <button
+                v-for="mention in workspace.mentions"
+                :key="mention.path"
+                type="button"
+                @click="workspace.removeMention(mention.path)"
+              >
+                @{{ mention.name }} ×
               </button>
+            </div>
+            <div class="turn-controls">
+              <select
+                v-model="workspace.selectedModel"
+                @change="workspace.setModel(workspace.selectedModel)"
+              >
+                <option v-for="model in workspace.models" :key="model.id" :value="model.id">
+                  {{ model.displayName }}
+                </option>
+              </select>
+              <select v-model="workspace.selectedEffort">
+                <option v-for="effort in workspace.supportedEfforts" :key="effort" :value="effort">
+                  {{ effort }}
+                </option>
+              </select>
+              <select v-model="workspace.selectedMode">
+                <option value="default">Default mode</option>
+                <option value="plan">Plan mode</option>
+              </select>
+            </div>
+            <div class="composer-footer">
+              <span>
+                Enter to send · Shift+Enter for newline
+                <strong v-if="workspace.queue.length" class="queue-count">
+                  · {{ workspace.queue.length }} queued
+                </strong>
+              </span>
+              <div class="composer-actions">
+                <button
+                  v-if="workspace.activeTurn"
+                  class="stop-button"
+                  type="button"
+                  @click="workspace.interrupt"
+                >
+                  Stop
+                </button>
+                <button class="send-button" type="submit" :disabled="!prompt.trim()">
+                  {{ workspace.activeTurn || workspace.sending ? 'Queue' : 'Send' }}
+                </button>
+              </div>
             </div>
           </form>
         </template>
@@ -293,7 +424,9 @@ function backendOpen(path: string) {
           {{
             workspace.currentApproval.kind === 'command'
               ? 'Run this command?'
-              : 'Apply file changes?'
+              : workspace.currentApproval.kind === 'permissions'
+                ? 'Grant requested permissions?'
+                : 'Apply file changes?'
           }}
         </h2>
         <p v-if="workspace.currentApproval.details.reason" class="approval-reason">
@@ -321,6 +454,68 @@ function backendOpen(path: string) {
           </button>
         </div>
       </div>
+    </article>
+
+    <article v-if="workspace.currentUserInput" class="approval-overlay">
+      <form class="approval-card interaction-card" @submit.prevent="submitUserInput">
+        <p class="eyebrow">Codex question</p>
+        <div
+          v-for="question in workspace.currentUserInput.details.questions"
+          :key="question.id"
+          class="question-block"
+        >
+          <h2>{{ question.header }}</h2>
+          <p>{{ question.question }}</p>
+          <label v-for="option in question.options ?? []" :key="option.label">
+            <input
+              type="radio"
+              :name="question.id"
+              :checked="userAnswers[question.id]?.[0] === option.label"
+              @change="chooseAnswer(question.id, option.label)"
+            />
+            <span><strong>{{ option.label }}</strong><small>{{ option.description }}</small></span>
+          </label>
+          <input
+            v-if="!question.options?.length || question.isOther"
+            type="text"
+            placeholder="Your answer"
+            @input="chooseAnswer(question.id, ($event.target as HTMLInputElement).value)"
+          />
+        </div>
+        <div class="approval-actions">
+          <button class="primary-button" type="submit">Continue</button>
+        </div>
+      </form>
+    </article>
+
+    <article v-if="workspace.currentElicitation" class="approval-overlay">
+      <form class="approval-card interaction-card" @submit.prevent="submitElicitation">
+        <p class="eyebrow">Tool input</p>
+        <h2>{{ workspace.currentElicitation.details.message }}</h2>
+        <label
+          v-for="(property, key) in workspace.currentElicitation.details.requestedSchema
+            ?.properties ?? {}"
+          :key="key"
+          class="field-label"
+        >
+          <span>{{ property.title || key }}</span>
+          <input
+            v-model="elicitationValues[key]"
+            :type="property.type === 'number' ? 'number' : 'text'"
+          />
+          <small>{{ property.description }}</small>
+        </label>
+        <div class="approval-actions">
+          <button
+            class="danger-button"
+            type="button"
+            @click="workspace.answerElicitation('decline')"
+          >
+            Decline
+          </button>
+          <button class="primary-button" type="submit">Continue</button>
+        </div>
+      </form>
     </article>
 
     <aside v-if="showDiagnostics" class="diagnostics-drawer">

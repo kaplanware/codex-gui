@@ -96,7 +96,12 @@ func NewClient(
 	}
 }
 
-func (c *Client) Start(ctx context.Context, executable string, info ClientInfo) error {
+func (c *Client) Start(
+	ctx context.Context,
+	executable string,
+	info ClientInfo,
+	capabilities ...map[string]any,
+) error {
 	c.cmd = exec.Command(executable, "app-server")
 	configureProcessGroup(c.cmd)
 
@@ -120,8 +125,12 @@ func (c *Client) Start(ctx context.Context, executable string, info ClientInfo) 
 
 	handshakeCtx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
+	params := map[string]any{"clientInfo": info}
+	if len(capabilities) > 0 && capabilities[0] != nil {
+		params["capabilities"] = capabilities[0]
+	}
 	var result json.RawMessage
-	if err := c.Call(handshakeCtx, "initialize", map[string]any{"clientInfo": info}, &result); err != nil {
+	if err := c.Call(handshakeCtx, "initialize", params, &result); err != nil {
 		c.stopAfterStartFailure()
 		return fmt.Errorf("initialize: %w", err)
 	}
