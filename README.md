@@ -11,7 +11,7 @@ and communicates with `codex app-server` over local stdio JSONL.
 
 ## Current status
 
-Milestones 0 and 1 are implemented:
+The core local workspace flow is implemented:
 
 - Wails v2 and Vue 3/TypeScript application foundation
 - Codex executable discovery and version compatibility checks
@@ -20,9 +20,15 @@ Milestones 0 and 1 are implemented:
 - `initialize` / `initialized` handshake
 - Sanitized Wails connection and activity events
 - Startup diagnostics interface
+- Codex-managed ChatGPT browser and device-code login
+- Persistent local projects and thread metadata in SQLite
+- Project directory picker and Git detection
+- Thread creation, resumption, and history loading
+- Streaming messages, command output, and turn state
+- Command/file approval prompts with once/session/reject decisions
+- Live unified turn diff viewer
 
-Authentication, projects, threads, approvals, diffs, SQLite persistence, and
-release packaging are planned but not part of this initial slice. See
+Release packaging and the post-MVP roadmap remain in progress. See
 [the development specification](docs/DOCUMENTATION.md).
 
 ## Requirements

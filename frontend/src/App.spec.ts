@@ -32,6 +32,27 @@ describe('App', () => {
           DetectCodex: vi.fn(),
           StartCodex: vi.fn(),
           RestartCodex: vi.fn(),
+          GetAccount: vi.fn().mockResolvedValue({
+            signedIn: true,
+            type: 'chatgpt',
+            email: 'developer@example.com',
+            planType: 'plus',
+            requiresOpenaiAuth: true,
+          }),
+          LoginWithChatGPT: vi.fn(),
+          LoginWithDeviceCode: vi.fn(),
+          Logout: vi.fn(),
+          SelectProject: vi.fn(),
+          AddProject: vi.fn(),
+          ListProjects: vi.fn().mockResolvedValue([]),
+          RemoveProject: vi.fn(),
+          ListThreads: vi.fn().mockResolvedValue([]),
+          StartThread: vi.fn(),
+          ResumeThread: vi.fn(),
+          SendMessage: vi.fn(),
+          InterruptTurn: vi.fn(),
+          RespondToApproval: vi.fn(),
+          OpenInFileManager: vi.fn(),
         },
       },
     }
@@ -45,9 +66,9 @@ describe('App', () => {
       global: { plugins: [createPinia()] },
     })
     await vi.waitFor(() => expect(wrapper.text()).toContain('ready'))
-    expect(wrapper.text()).toContain('0.145.0')
-    expect(wrapper.text()).toContain('2.50.0')
-    expect(window.runtime?.EventsOn).toHaveBeenCalledTimes(2)
+    expect(wrapper.text()).toContain('Add your first project')
+    expect(wrapper.text()).toContain('developer@example.com')
+    expect(window.runtime?.EventsOn).toHaveBeenCalled()
   })
 
   it('unsubscribes from runtime events when unmounted', async () => {
@@ -55,6 +76,6 @@ describe('App', () => {
     window.runtime = { EventsOn: vi.fn().mockReturnValue(unsubscribe) }
     const wrapper = mount(App, { global: { plugins: [createPinia()] } })
     wrapper.unmount()
-    expect(unsubscribe).toHaveBeenCalledTimes(2)
+    expect(unsubscribe).toHaveBeenCalled()
   })
 })

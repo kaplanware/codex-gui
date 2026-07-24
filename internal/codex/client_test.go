@@ -51,6 +51,7 @@ func TestClientHandshakeAndRouting(t *testing.T) {
 			mu.Unlock()
 		},
 		nil,
+		nil,
 	)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

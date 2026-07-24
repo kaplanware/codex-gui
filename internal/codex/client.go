@@ -28,6 +28,17 @@ type rpcResponse struct {
 	Error  *rpcError       `json:"error,omitempty"`
 }
 
+type rpcRequest struct {
+	Method string `json:"method"`
+	ID     int64  `json:"id"`
+	Params any    `json:"params,omitempty"`
+}
+
+type rpcNotification struct {
+	Method string `json:"method"`
+	Params any    `json:"params,omitempty"`
+}
+
 type rpcError struct {
 	Code    int             `json:"code"`
 	Message string          `json:"message"`
@@ -69,13 +80,19 @@ type Client struct {
 	stopOnce sync.Once
 
 	onActivity func(Activity)
+	onMessage  func(method string, id []byte, params []byte)
 	onExit     func(error)
 }
 
-func NewClient(logger *slog.Logger, onActivity func(Activity), onExit func(error)) *Client {
+func NewClient(
+	logger *slog.Logger,
+	onActivity func(Activity),
+	onMessage func(method string, id []byte, params []byte),
+	onExit func(error),
+) *Client {
 	return &Client{
 		logger: logger, pending: make(map[int64]chan rpcResponse), done: make(chan struct{}),
-		onActivity: onActivity, onExit: onExit,
+		onActivity: onActivity, onMessage: onMessage, onExit: onExit,
 	}
 }
 
@@ -133,7 +150,7 @@ func (c *Client) Call(ctx context.Context, method string, params any, result any
 		c.pendingMu.Unlock()
 	}()
 
-	if err := c.writeJSON(map[string]any{"method": method, "id": id, "params": params}); err != nil {
+	if err := c.writeJSON(rpcRequest{Method: method, ID: id, Params: params}); err != nil {
 		return err
 	}
 	select {
@@ -156,7 +173,18 @@ func (c *Client) Call(ctx context.Context, method string, params any, result any
 }
 
 func (c *Client) Notify(method string, params any) error {
-	return c.writeJSON(map[string]any{"method": method, "params": params})
+	return c.writeJSON(rpcNotification{Method: method, Params: params})
+}
+
+func (c *Client) Respond(id json.RawMessage, result any) error {
+	if len(id) == 0 || !json.Valid(id) {
+		return errors.New("invalid server request id")
+	}
+	var resultValue any = result
+	return c.writeJSON(struct {
+		ID     json.RawMessage `json:"id"`
+		Result any             `json:"result"`
+	}{ID: id, Result: resultValue})
 }
 
 func (c *Client) writeJSON(value any) error {
@@ -188,6 +216,13 @@ func (c *Client) readLoop() {
 				kind = "server-request"
 			}
 			c.activity(Activity{Kind: kind, Method: message.Method, Timestamp: timestamp()})
+			if c.onMessage != nil {
+				c.onMessage(
+					message.Method,
+					append(json.RawMessage(nil), message.ID...),
+					append(json.RawMessage(nil), message.Params...),
+				)
+			}
 			continue
 		}
 		id, err := parseNumericID(message.ID)

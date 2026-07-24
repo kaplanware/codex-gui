@@ -11,6 +11,7 @@ import (
 )
 
 type Emitter func(name string, payload any)
+type ProtocolHandler func(method string, id []byte, params []byte)
 
 type Manager struct {
 	operationMu  sync.Mutex
@@ -18,6 +19,7 @@ type Manager struct {
 	logger       *slog.Logger
 	detector     *Detector
 	emitter      Emitter
+	handler      ProtocolHandler
 	state        ConnectionState
 	installation *CodexInstallation
 	lastError    *AppError
@@ -35,6 +37,12 @@ func (m *Manager) SetEmitter(emitter Emitter) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.emitter = emitter
+}
+
+func (m *Manager) SetProtocolHandler(handler ProtocolHandler) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.handler = handler
 }
 
 func (m *Manager) Detect(ctx context.Context) (CodexInstallation, error) {
@@ -77,9 +85,14 @@ func (m *Manager) start(ctx context.Context) error {
 	m.transition(StateStarting, nil)
 
 	var client *Client
-	client = NewClient(m.logger, m.emitActivity, func(exitErr error) {
-		m.handleExit(clientReference(m, client), exitErr)
-	})
+	client = NewClient(
+		m.logger,
+		m.emitActivity,
+		m.handleProtocolMessage,
+		func(exitErr error) {
+			m.handleExit(clientReference(m, client), exitErr)
+		},
+	)
 	m.mu.Lock()
 	m.client = client
 	m.mu.Unlock()
@@ -152,6 +165,35 @@ func (m *Manager) Status() StartupStatus {
 	return status
 }
 
+func (m *Manager) Call(ctx context.Context, method string, params any, result any) error {
+	m.mu.RLock()
+	client := m.client
+	state := m.state
+	m.mu.RUnlock()
+	if client == nil || state != StateReady {
+		return &AppError{
+			Code: ErrCodexStartFailed, Summary: "Codex app-server is not ready",
+			Detail: "Wait for the connection to become ready and retry.", Retryable: true,
+		}
+	}
+	return client.Call(ctx, method, params, result)
+}
+
+func (m *Manager) Respond(requestID string, result any) error {
+	m.mu.RLock()
+	client := m.client
+	state := m.state
+	m.mu.RUnlock()
+	if client == nil || state != StateReady {
+		return &AppError{Code: ErrCodexExited, Summary: "Codex app-server is not ready", Retryable: true}
+	}
+	rawID := []byte(requestID)
+	if len(rawID) == 0 {
+		return &AppError{Code: ErrProtocolMalformed, Summary: "Approval request ID is missing"}
+	}
+	return client.Respond(rawID, result)
+}
+
 func (m *Manager) transition(state ConnectionState, appErr *AppError) {
 	m.mu.Lock()
 	m.state = state
@@ -175,6 +217,15 @@ func (m *Manager) emitActivity(activity Activity) {
 	m.mu.RUnlock()
 	if emitter != nil {
 		emitter("codex:activity", activity)
+	}
+}
+
+func (m *Manager) handleProtocolMessage(method string, id, params []byte) {
+	m.mu.RLock()
+	handler := m.handler
+	m.mu.RUnlock()
+	if handler != nil {
+		handler(method, append([]byte(nil), id...), append([]byte(nil), params...))
 	}
 }
 
