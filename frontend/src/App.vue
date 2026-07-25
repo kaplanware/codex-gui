@@ -14,9 +14,8 @@ const workspace = useWorkspaceStore()
 const prompt = ref('')
 const conversation = ref<HTMLElement | null>(null)
 const showDiagnostics = ref(false)
-const showUsage = ref(false)
 const showModelMenu = ref(false)
-const currentView = ref<'chat' | 'agents'>('chat')
+const currentView = ref<'chat' | 'agents' | 'settings'>('chat')
 const taskTitle = ref('')
 const taskPrompt = ref('')
 const taskWorkflow = ref<'delivery' | 'parallel'>('delivery')
@@ -45,15 +44,6 @@ const needsLogin = computed(
   () => connected.value && workspace.account !== null && !workspace.account.signedIn,
 )
 const statusText = computed(() => diagnostics.status?.state?.replace(/_/g, ' ') ?? 'starting')
-const usageLabel = computed(() => {
-  const limits = workspace.rateLimits
-  if (!limits?.primary) return ''
-  const primary = `${Math.round(limits.primary.remainingPercent)}% left`
-  return limits.secondary
-    ? `${primary} · ${Math.round(limits.secondary.remainingPercent)}% long-term`
-    : primary
-})
-
 onMounted(async () => {
   unsubscribeConsole = subscribe('provider:console', (payload) => {
     const event = payload as ProviderConsoleEvent
@@ -337,7 +327,12 @@ const failedRuns = computed(() =>
 function itemTitle(item: ConversationItem): string {
   switch (item.type) {
     case 'agentMessage':
-      return 'Codex'
+      return (
+        workspace.agentProviders.find((provider) => provider.id === item.providerId)?.name ||
+        workspace.agentProviders.find((provider) => provider.id === workspace.selectedProvider)
+          ?.name ||
+        'Agent'
+      )
     case 'userMessage':
       return 'You'
     case 'commandExecution':
@@ -385,7 +380,7 @@ function backendOpen(path: string) {
           <span>{{ workspace.activeProject?.path ?? 'Choose a local project' }}</span>
         </div>
       </div>
-      <nav v-if="connected && !needsLogin" class="view-switcher">
+      <nav v-if="connected" class="view-switcher">
         <button
           type="button"
           :class="{ active: currentView === 'chat' }"
@@ -400,48 +395,19 @@ function backendOpen(path: string) {
         >
           Mission Control
         </button>
+        <button
+          type="button"
+          :class="{ active: currentView === 'settings' }"
+          @click="currentView = 'settings'; workspace.loadProviders(); workspace.loadProviderUsage()"
+        >
+          Settings
+        </button>
       </nav>
       <div class="header-actions">
-        <button v-if="usageLabel" class="usage-chip" type="button" @click="showUsage = !showUsage">
-          {{ usageLabel }}
-        </button>
-        <div v-if="showUsage" class="usage-popover">
-          <div class="popover-heading">
-            <div>
-              <small>Usage limits</small><strong>{{ workspace.rateLimits?.limitName || 'Codex' }}</strong>
-            </div>
-            <button type="button" @click="showUsage = false">×</button>
-          </div>
-          <div v-if="workspace.rateLimits?.primary" class="usage-window">
-            <span>Short-term window</span>
-            <strong>{{ Math.round(workspace.rateLimits.primary.remainingPercent) }}% left</strong>
-            <progress :value="workspace.rateLimits.primary.remainingPercent" max="100"></progress>
-            <small>Automatically resets: {{ formatReset(workspace.rateLimits.primary.resetsAt) }}</small>
-          </div>
-          <div v-if="workspace.rateLimits?.secondary" class="usage-window">
-            <span>Long-term window</span>
-            <strong>{{ Math.round(workspace.rateLimits.secondary.remainingPercent) }}% left</strong>
-            <progress :value="workspace.rateLimits.secondary.remainingPercent" max="100"></progress>
-            <small>Automatically resets:
-              {{ formatReset(workspace.rateLimits.secondary.resetsAt) }}</small>
-          </div>
-          <p>
-            Limits are reset by the provider automatically. This client cannot manually reset
-            provider quota.
-          </p>
-          <button class="secondary-button" type="button" @click="workspace.loadRateLimits">
-            Refresh usage
-          </button>
-        </div>
         <button class="connection-chip" type="button" @click="showDiagnostics = !showDiagnostics">
           <span class="status-dot" :data-ready="connected"></span>
           {{ statusText }}
         </button>
-        <div v-if="workspace.account?.signedIn" class="account-chip">
-          <span>{{ workspace.account.email || workspace.account.type }}</span>
-          <small>{{ workspace.account.planType }}</small>
-          <button type="button" title="Sign out" @click="workspace.logout">Sign out</button>
-        </div>
       </div>
     </header>
 
@@ -454,24 +420,50 @@ function backendOpen(path: string) {
       </button>
     </section>
 
-    <section v-else-if="needsLogin" class="center-state login-state">
-      <p class="eyebrow">Authentication</p>
-      <h1>Continue with ChatGPT</h1>
-      <p>Authentication is handled by your installed Codex runtime in the system browser.</p>
-      <div class="login-actions">
-        <button class="primary-button" type="button" @click="workspace.login">
-          Continue with ChatGPT
+    <section v-else-if="currentView === 'settings'" class="settings-view">
+      <header class="settings-heading">
+        <div>
+          <p class="eyebrow">Agent accounts</p>
+          <h1>Providers & authentication</h1>
+          <span>Connect local coding-agent CLIs once, then choose them directly in Workspace.</span>
+        </div>
+        <button class="secondary-button" type="button" @click="workspace.loadProviders">
+          Refresh detection
         </button>
-        <button class="secondary-button" type="button" @click="workspace.loginWithDeviceCode">
-          Use device code
-        </button>
+      </header>
+      <div class="settings-provider-grid">
+        <article v-for="provider in workspace.agentProviders" :key="provider.id">
+          <span class="provider-mark">{{ provider.name.slice(0, 1) }}</span>
+          <div>
+            <h3>{{ provider.name }}</h3>
+            <p>{{ provider.version || provider.status }}</p>
+            <small :data-auth="provider.authStatus">{{ provider.authStatus }}</small>
+          </div>
+          <div class="settings-provider-actions">
+            <button
+              class="primary-button"
+              type="button"
+              :disabled="provider.authStatus === 'not-required'"
+              @click="providerAction(provider)"
+            >
+              {{ !provider.installed ? 'Set up' : provider.authStatus === 'authenticated' ? 'Manage account' : 'Log in' }}
+            </button>
+            <button
+              v-if="provider.id === 'codex' && provider.authStatus === 'authenticated'"
+              class="secondary-button"
+              type="button"
+              @click="workspace.logout(); workspace.loadProviders()"
+            >
+              Sign out
+            </button>
+          </div>
+        </article>
       </div>
       <div v-if="workspace.deviceLogin" class="device-code">
         <span>Enter this code in the browser</span>
         <strong>{{ workspace.deviceLogin.userCode }}</strong>
         <small>{{ workspace.deviceLogin.verificationUrl }}</small>
       </div>
-      <p v-if="workspace.error" class="inline-error">{{ workspace.error }}</p>
     </section>
 
     <section v-else-if="currentView === 'chat'" class="workspace">
@@ -521,7 +513,10 @@ function backendOpen(path: string) {
                 @click="workspace.selectThread(thread)"
               >
                 <strong>{{ thread.title || 'New thread' }}</strong>
-                <small>{{ new Date(thread.updatedAt).toLocaleDateString() }}</small>
+                <small>
+                  {{ workspace.agentProviders.find((provider) => provider.id === thread.providerId)?.name || thread.providerId }}
+                  · {{ new Date(thread.updatedAt).toLocaleDateString() }}
+                </small>
               </button>
               <button class="import-thread" type="button" @click="workspace.importThread(project)">
                 Import chat…
@@ -544,17 +539,38 @@ function backendOpen(path: string) {
         <div v-if="!workspace.activeProject" class="pane-empty">
           <div class="empty-icon">+</div>
           <h2>Add your first project</h2>
-          <p>Select a local repository or directory where Codex should work.</p>
+          <p>Select a local repository or directory where your coding agents should work.</p>
           <button class="primary-button" type="button" @click="workspace.addProject">
             Add project
           </button>
         </div>
         <div v-else-if="!workspace.activeThread" class="pane-empty">
           <div class="empty-icon">✦</div>
-          <h2>Start a Codex thread</h2>
+          <h2>Start an agent thread</h2>
           <p>
-            Codex will work inside {{ workspace.activeProject.name }} with approval prompts enabled.
+            Choose a connected coding agent and work directly inside
+            {{ workspace.activeProject.name }}.
           </p>
+          <div class="new-thread-routing">
+            <select
+              :value="workspace.selectedProvider"
+              @change="workspace.selectProvider(($event.target as HTMLSelectElement).value)"
+            >
+              <option
+                v-for="provider in workspace.agentProviders"
+                :key="provider.id"
+                :value="provider.id"
+                :disabled="!provider.runnable && provider.id !== 'ollama'"
+              >
+                {{ provider.name }}
+              </option>
+            </select>
+            <select v-model="workspace.selectedModel">
+              <option v-for="model in workspace.providerModels" :key="model.id" :value="model.id">
+                {{ model.name }}
+              </option>
+            </select>
+          </div>
           <button class="primary-button" type="button" @click="workspace.newThread()">
             New thread
           </button>
@@ -566,7 +582,9 @@ function backendOpen(path: string) {
               <h2>{{ workspace.activeThread.title }}</h2>
             </div>
             <div class="title-actions">
-              <span v-if="workspace.activeTurn" class="working-label">Codex is working…</span>
+              <span v-if="workspace.activeTurn" class="working-label">
+                {{ workspace.agentProviders.find((provider) => provider.id === workspace.selectedProvider)?.name || 'Agent' }} is working…
+              </span>
               <button class="secondary-button" type="button" @click="workspace.exportActiveThread">
                 Export
               </button>
@@ -594,7 +612,7 @@ function backendOpen(path: string) {
             </article>
             <div v-if="!workspace.items.length" class="conversation-welcome">
               <span>✦</span>
-              <h3>What should Codex do?</h3>
+              <h3>What should your agent do?</h3>
               <p>Ask about the codebase, request a change, or run tests.</p>
             </div>
           </div>
@@ -602,7 +620,7 @@ function backendOpen(path: string) {
             <textarea
               v-model="prompt"
               rows="3"
-              placeholder="Message Codex…"
+              :placeholder="`Message ${workspace.agentProviders.find((provider) => provider.id === workspace.selectedProvider)?.name || 'agent'}…`"
               @input="handlePromptInput"
               @keydown.enter.exact.prevent="submit"
             ></textarea>
@@ -627,30 +645,47 @@ function backendOpen(path: string) {
               </button>
             </div>
             <div class="turn-controls">
+              <label class="inline-provider-select">
+                <span>Agent</span>
+                <select
+                  :value="workspace.selectedProvider"
+                  :disabled="!!workspace.activeTurn"
+                  @change="workspace.selectProvider(($event.target as HTMLSelectElement).value)"
+                >
+                  <option
+                    v-for="provider in workspace.agentProviders"
+                    :key="provider.id"
+                    :value="provider.id"
+                    :disabled="!provider.runnable && provider.id !== 'ollama'"
+                  >
+                    {{ provider.name }} · {{ provider.authStatus }}
+                  </option>
+                </select>
+              </label>
               <div class="model-control">
                 <button
                   class="control-trigger"
                   type="button"
                   @click="showModelMenu = !showModelMenu"
                 >
-                  <span>Model</span><strong>{{ workspace.currentModel?.displayName || 'Default' }}</strong><b>⌄</b>
+                  <span>Model</span><strong>{{ workspace.providerModels.find((model) => model.id === workspace.selectedModel)?.name || 'Default' }}</strong><b>⌄</b>
                 </button>
                 <div v-if="showModelMenu" class="model-menu">
                   <button
-                    v-for="model in workspace.models"
+                    v-for="model in workspace.providerModels"
                     :key="model.id"
                     type="button"
                     :class="{ active: model.id === workspace.selectedModel }"
                     @click="
-                      workspace.setModel(model.id);
+                      workspace.selectedModel = model.id;
                       showModelMenu = false
                     "
                   >
-                    <strong>{{ model.displayName }}</strong><small>{{ model.description }}</small>
+                    <strong>{{ model.name }}</strong><small>{{ model.providerId }}</small>
                   </button>
                 </div>
               </div>
-              <div class="segmented-control" aria-label="Reasoning effort">
+              <div v-if="workspace.selectedProvider === 'codex'" class="segmented-control" aria-label="Reasoning effort">
                 <button
                   v-for="effort in workspace.supportedEfforts"
                   :key="effort"
@@ -767,20 +802,7 @@ function backendOpen(path: string) {
                 <small class="auth-state">{{ provider.authStatus }}</small>
               </div>
               <i :data-ready="provider.runnable"></i>
-              <button
-                class="provider-auth"
-                type="button"
-                :disabled="provider.authStatus === 'not-required'"
-                @click.stop="providerAction(provider)"
-              >
-                {{
-                  !provider.installed
-                    ? 'Set up'
-                    : provider.authStatus === 'authenticated'
-                      ? 'Manage'
-                      : 'Login'
-                }}
-              </button>
+              <small class="mission-provider-note">Manage in Settings</small>
             </article>
           </div>
 
@@ -1097,7 +1119,7 @@ function backendOpen(path: string) {
           <div>
             <p class="eyebrow">Plan artifact · Needs review</p>
             <h2>Review before implementation</h2>
-            <span>Codex stayed read-only during this planning turn.</span>
+            <span>The selected agent stayed read-only during this planning turn.</span>
           </div>
           <button type="button" @click="workspace.closePlanReview">×</button>
         </header>
@@ -1111,7 +1133,7 @@ function backendOpen(path: string) {
               <li>Implementation</li>
               <li>Verification</li>
             </ol>
-            <small>Approval switches the next turn to implementation mode. Revision keeps Codex in
+            <small>Approval switches the next turn to implementation mode. Revision keeps the agent in
               strict read-only planning mode.</small>
           </aside>
           <div class="plan-document">
@@ -1283,6 +1305,23 @@ function backendOpen(path: string) {
         Restart app-server
       </button>
     </aside>
+
+    <footer v-if="connected && workspace.providerUsage.length" class="provider-usage-footer">
+      <button
+        v-for="usage in workspace.providerUsage"
+        :key="usage.providerId"
+        type="button"
+        :title="`${usage.detail}${usage.resetsAt ? ` · resets ${formatReset(usage.resetsAt)}` : ''}`"
+        @click="currentView = 'settings'"
+      >
+        <i :data-authenticated="usage.authenticated"></i>
+        <strong>{{ usage.name }}</strong>
+        <span v-if="usage.remainingPercent !== undefined">
+          {{ Math.round(usage.remainingPercent) }}%
+        </span>
+        <span v-else>{{ usage.authenticated ? usage.detail : 'Sign in' }}</span>
+      </button>
+    </footer>
 
     <p v-if="workspace.error && !needsLogin" class="toast" role="alert">{{ workspace.error }}</p>
   </main>

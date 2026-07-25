@@ -26,7 +26,7 @@ func main() {
 		OnStartup:        app.startup,
 		OnShutdown:       app.shutdown,
 		Bind:             []interface{}{app},
-		Linux:            &linux.Options{ProgramName: "linux-codex-desktop"},
+		Linux:            &linux.Options{ProgramName: "agent-workspace"},
 	})
 	if err != nil {
 		println("Error:", err.Error())

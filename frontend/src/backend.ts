@@ -14,6 +14,8 @@ import type {
   PreflightCheck,
   ProviderAuthStart,
   ProviderConsoleSession,
+  ProviderModel,
+  ProviderUsage,
   RateLimits,
   StartupStatus,
   Thread,
@@ -37,6 +39,9 @@ export const backend = {
   getRateLimits: () => app().GetRateLimits() as Promise<RateLimits>,
   listModels: () => app().ListModels() as Promise<Model[]>,
   listAgentProviders: () => app().ListAgentProviders() as Promise<AgentProvider[]>,
+  listProviderModels: (providerId: string) =>
+    app().ListProviderModels(providerId) as Promise<ProviderModel[]>,
+  listProviderUsage: () => app().ListProviderUsage() as Promise<ProviderUsage[]>,
   beginProviderLogin: (providerId: string) =>
     app().BeginProviderLogin(providerId) as Promise<ProviderAuthStart>,
   startProviderConsole: (
@@ -94,6 +99,8 @@ export const backend = {
   removeProject: (id: string) => app().RemoveProject(id),
   listThreads: (projectId: string) => app().ListThreads(projectId) as Promise<Thread[]>,
   startThread: (projectId: string) => app().StartThread(projectId) as Promise<Thread>,
+  startAgentThread: (projectId: string, providerId: string, model: string) =>
+    app().StartAgentThread(projectId, providerId, model) as Promise<Thread>,
   resumeThread: (threadId: string) => app().ResumeThread(threadId) as Promise<Thread>,
   sendMessage: (threadId: string, text: string) =>
     app().SendMessage(threadId, text) as Promise<TurnStart>,

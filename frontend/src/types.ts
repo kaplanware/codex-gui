@@ -89,6 +89,21 @@ export interface Model {
   supportedReasoningEfforts: string[]
 }
 
+export interface ProviderModel {
+  id: string
+  name: string
+  providerId: string
+}
+
+export interface ProviderUsage {
+  providerId: string
+  name: string
+  authenticated: boolean
+  remainingPercent?: number
+  resetsAt?: number
+  detail: string
+}
+
 export interface FileMatch {
   name: string
   path: string
@@ -145,6 +160,8 @@ export interface Project {
 export interface Thread {
   id: string
   projectId: string
+  providerId: string
+  model?: string
   title: string
   status: string
   createdAt: string
@@ -165,6 +182,7 @@ export interface ConversationItem {
   command?: string
   cwd?: string
   status?: string
+  providerId?: string
   aggregatedOutput?: string | null
   exitCode?: number | null
   changes?: Array<Record<string, unknown>>

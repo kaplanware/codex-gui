@@ -17,6 +17,8 @@ import type {
   Project,
   ProjectMemory,
   PreflightCheck,
+  ProviderModel,
+  ProviderUsage,
   RateLimits,
   Thread,
   TurnOptions,
@@ -51,6 +53,9 @@ export const useWorkspaceStore = defineStore('workspace', {
     rateLimits: null as RateLimits | null,
     models: [] as Model[],
     agentProviders: [] as AgentProvider[],
+    providerModels: [] as ProviderModel[],
+    providerUsage: [] as ProviderUsage[],
+    selectedProvider: 'codex',
     agentTasks: [] as AgentTaskBundle[],
     preflight: [] as PreflightCheck[],
     contextEntries: [] as ContextEntry[],
@@ -96,7 +101,13 @@ export const useWorkspaceStore = defineStore('workspace', {
   actions: {
     async initialize() {
       this.connectEvents()
-      await Promise.all([this.loadAccount(), this.loadProjects(), this.loadModels()])
+      await Promise.all([
+        this.loadAccount(),
+        this.loadProjects(),
+        this.loadModels(),
+        this.loadProviders(),
+        this.loadProviderUsage(),
+      ])
     },
     connectEvents() {
       if (this.unsubscribers.length) return
@@ -204,6 +215,41 @@ export const useWorkspaceStore = defineStore('workspace', {
         if (!this.selectedModel && defaultModel) this.setModel(defaultModel.id)
       } catch (error) {
         this.error = message(error)
+      }
+    },
+    async loadProviders() {
+      try {
+        this.agentProviders = await backend.listAgentProviders()
+        if (!this.agentProviders.some((provider) => provider.id === this.selectedProvider && provider.runnable)) {
+          this.selectedProvider = this.agentProviders.find((provider) => provider.runnable)?.id ?? 'codex'
+        }
+        await this.loadProviderModels()
+      } catch (error) {
+        this.error = message(error)
+      }
+    },
+    async loadProviderModels() {
+      try {
+        this.providerModels = await backend.listProviderModels(this.selectedProvider)
+        const current = this.providerModels.find((model) => model.id === this.selectedModel)
+        if (!current) this.selectedModel = this.providerModels[0]?.id ?? ''
+      } catch {
+        this.providerModels = []
+      }
+    },
+    async selectProvider(providerId: string) {
+      this.selectedProvider = providerId
+      this.selectedModel = ''
+      await this.loadProviderModels()
+      if (this.activeProject && this.activeThread?.providerId !== providerId) {
+        await this.newThread(this.activeProject)
+      }
+    },
+    async loadProviderUsage() {
+      try {
+        this.providerUsage = await backend.listProviderUsage()
+      } catch {
+        this.providerUsage = []
       }
     },
     async loadAgentWorkspace() {
@@ -392,7 +438,11 @@ export const useWorkspaceStore = defineStore('workspace', {
       await this.run(async () => {
         this.activeProject = project
         this.expandedProjects[project.id] = true
-        const thread = await backend.startThread(project.id)
+        const thread = await backend.startAgentThread(
+          project.id,
+          this.selectedProvider,
+          this.selectedModel,
+        )
         await this.loadThreads(project.id)
         await this.selectThread(thread, false)
       })
@@ -405,6 +455,9 @@ export const useWorkspaceStore = defineStore('workspace', {
           this.expandedProjects[project.id] = true
         }
         this.activeThread = resume ? await backend.resumeThread(thread.id) : thread
+        this.selectedProvider = this.activeThread.providerId || 'codex'
+        this.selectedModel = this.activeThread.model || ''
+        await this.loadProviderModels()
         this.items = this.activeThread.items ?? []
         this.diff = ''
         this.activeTurn = null

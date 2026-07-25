@@ -42,6 +42,8 @@ describe('App', () => {
           GetRateLimits: vi.fn().mockResolvedValue({}),
           ListModels: vi.fn().mockResolvedValue([]),
           ListAgentProviders: vi.fn().mockResolvedValue([]),
+          ListProviderModels: vi.fn().mockResolvedValue([]),
+          ListProviderUsage: vi.fn().mockResolvedValue([]),
           BeginProviderLogin: vi.fn(),
           StartProviderConsole: vi.fn(),
           WriteProviderConsole: vi.fn(),
@@ -71,6 +73,7 @@ describe('App', () => {
           RemoveProject: vi.fn(),
           ListThreads: vi.fn().mockResolvedValue([]),
           StartThread: vi.fn(),
+          StartAgentThread: vi.fn(),
           ResumeThread: vi.fn(),
           SendMessage: vi.fn(),
           SendMessageWithOptions: vi.fn(),
@@ -99,7 +102,7 @@ describe('App', () => {
     })
     await vi.waitFor(() => expect(wrapper.text()).toContain('ready'))
     expect(wrapper.text()).toContain('Add your first project')
-    expect(wrapper.text()).toContain('developer@example.com')
+    expect(wrapper.text()).toContain('Settings')
     expect(window.runtime?.EventsOn).toHaveBeenCalled()
   })
 

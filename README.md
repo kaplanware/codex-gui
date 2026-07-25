@@ -3,9 +3,9 @@
 The open-source command center for coding agents on Linux.
 
 Agent Workspace is a local control plane for planning, running, reviewing, and
-verifying coding-agent work. Codex is the first executable provider; Claude
-Code, Antigravity, Gemini, OpenCode, and Ollama are detected through the common
-provider registry and become selectable when their local adapters are available.
+verifying coding-agent work. Codex, Claude Code, Gemini CLI, OpenCode, and
+Ollama can be selected directly in Workspace; Mission Control coordinates
+parallel provider-independent delivery and review workflows.
 
 > This is an independent open-source client and is not an official OpenAI
 > product. Codex, ChatGPT, and OpenAI are trademarks of their respective owner.

@@ -24,12 +24,24 @@ type Project struct {
 }
 
 type Thread struct {
-	ID        string `json:"id"`
-	ProjectID string `json:"projectId"`
-	Title     string `json:"title"`
-	Status    string `json:"status"`
-	CreatedAt string `json:"createdAt"`
-	UpdatedAt string `json:"updatedAt"`
+	ID         string `json:"id"`
+	ProjectID  string `json:"projectId"`
+	ProviderID string `json:"providerId"`
+	Model      string `json:"model,omitempty"`
+	Title      string `json:"title"`
+	Status     string `json:"status"`
+	CreatedAt  string `json:"createdAt"`
+	UpdatedAt  string `json:"updatedAt"`
+}
+
+type ChatMessage struct {
+	ID         string `json:"id"`
+	ThreadID   string `json:"threadId"`
+	ProviderID string `json:"providerId"`
+	Role       string `json:"role"`
+	Text       string `json:"text"`
+	Status     string `json:"status"`
+	CreatedAt  string `json:"createdAt"`
 }
 
 type Task struct {
@@ -182,13 +194,49 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at TEXT NOT NULL,
 			FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 		);
+		CREATE TABLE IF NOT EXISTS chat_messages (
+			id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, provider_id TEXT NOT NULL,
+			role TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL,
+			FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE
+		);
+		CREATE INDEX IF NOT EXISTS idx_chat_messages_thread ON chat_messages(thread_id, created_at);
 		CREATE INDEX IF NOT EXISTS idx_agent_tasks_project ON agent_tasks(project_id, updated_at DESC);
 		CREATE INDEX IF NOT EXISTS idx_agent_runs_task ON agent_runs(task_id);
 		CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(task_id, updated_at DESC);
 		INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, datetime('now'));
 		INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (2, datetime('now'));
 	`)
+	if err == nil {
+		_, _ = s.db.ExecContext(ctx, `ALTER TABLE threads ADD COLUMN provider_id TEXT NOT NULL DEFAULT 'codex'`)
+		_, _ = s.db.ExecContext(ctx, `ALTER TABLE threads ADD COLUMN model TEXT NOT NULL DEFAULT ''`)
+	}
 	return err
+}
+
+func (s *Store) AddChatMessage(ctx context.Context, message ChatMessage) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO chat_messages
+		(id, thread_id, provider_id, role, text, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		message.ID, message.ThreadID, message.ProviderID, message.Role, message.Text, message.Status, message.CreatedAt)
+	return err
+}
+
+func (s *Store) ListChatMessages(ctx context.Context, threadID string) ([]ChatMessage, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, thread_id, provider_id, role, text, status, created_at
+		FROM chat_messages WHERE thread_id = ? ORDER BY created_at`, threadID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var messages []ChatMessage
+	for rows.Next() {
+		var message ChatMessage
+		if err := rows.Scan(&message.ID, &message.ThreadID, &message.ProviderID, &message.Role,
+			&message.Text, &message.Status, &message.CreatedAt); err != nil {
+			return nil, err
+		}
+		messages = append(messages, message)
+	}
+	return messages, rows.Err()
 }
 
 func (s *Store) CreateTask(ctx context.Context, task Task) error {
@@ -420,20 +468,22 @@ func (s *Store) TouchProject(ctx context.Context, id string) error {
 
 func (s *Store) UpsertThread(ctx context.Context, thread Thread) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO threads (id, project_id, title, status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO threads (id, project_id, provider_id, model, title, status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			project_id = excluded.project_id,
+			provider_id = excluded.provider_id,
+			model = excluded.model,
 			title = CASE WHEN excluded.title = '' THEN threads.title ELSE excluded.title END,
 			status = excluded.status,
 			updated_at = excluded.updated_at
-	`, thread.ID, thread.ProjectID, thread.Title, thread.Status, thread.CreatedAt, thread.UpdatedAt)
+	`, thread.ID, thread.ProjectID, thread.ProviderID, thread.Model, thread.Title, thread.Status, thread.CreatedAt, thread.UpdatedAt)
 	return err
 }
 
 func (s *Store) ListThreads(ctx context.Context, projectID string) ([]Thread, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, project_id, title, status, created_at, updated_at
+		SELECT id, project_id, COALESCE(provider_id,'codex'), COALESCE(model,''), title, status, created_at, updated_at
 		FROM threads WHERE project_id = ? ORDER BY updated_at DESC
 	`, projectID)
 	if err != nil {
@@ -444,7 +494,7 @@ func (s *Store) ListThreads(ctx context.Context, projectID string) ([]Thread, er
 	for rows.Next() {
 		var thread Thread
 		if err := rows.Scan(
-			&thread.ID, &thread.ProjectID, &thread.Title, &thread.Status,
+			&thread.ID, &thread.ProjectID, &thread.ProviderID, &thread.Model, &thread.Title, &thread.Status,
 			&thread.CreatedAt, &thread.UpdatedAt,
 		); err != nil {
 			return nil, err
@@ -457,10 +507,10 @@ func (s *Store) ListThreads(ctx context.Context, projectID string) ([]Thread, er
 func (s *Store) GetThread(ctx context.Context, id string) (Thread, error) {
 	var thread Thread
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, project_id, title, status, created_at, updated_at
+		SELECT id, project_id, COALESCE(provider_id,'codex'), COALESCE(model,''), title, status, created_at, updated_at
 		FROM threads WHERE id = ?
 	`, id).Scan(
-		&thread.ID, &thread.ProjectID, &thread.Title, &thread.Status,
+		&thread.ID, &thread.ProjectID, &thread.ProviderID, &thread.Model, &thread.Title, &thread.Status,
 		&thread.CreatedAt, &thread.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {

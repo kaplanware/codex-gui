@@ -37,6 +37,8 @@ type App struct {
 	terminals      *terminal.Manager
 	runMu          sync.Mutex
 	turnRuns       map[string]runReference
+	chatMu         sync.Mutex
+	chatCancels    map[string]context.CancelFunc
 	coordinationMu sync.Mutex
 	watchers       map[string]context.CancelFunc
 }
@@ -53,7 +55,7 @@ func NewApp() *App {
 	app := &App{
 		manager: codex.NewManager(logger), store: store, databaseErr: err, logger: logger,
 		agentRegistry: agents.NewRegistry(), turnRuns: make(map[string]runReference),
-		watchers: make(map[string]context.CancelFunc),
+		watchers: make(map[string]context.CancelFunc), chatCancels: make(map[string]context.CancelFunc),
 	}
 	if store != nil {
 		app.projects = projects.NewService(store)
@@ -114,6 +116,12 @@ type CoordinationMessage struct {
 
 func (a *App) shutdown(_ context.Context) {
 	a.terminals.StopAll()
+	a.chatMu.Lock()
+	for _, cancel := range a.chatCancels {
+		cancel()
+	}
+	a.chatCancels = make(map[string]context.CancelFunc)
+	a.chatMu.Unlock()
 	a.coordinationMu.Lock()
 	for _, cancel := range a.watchers {
 		cancel()
@@ -161,13 +169,30 @@ type LoginStart struct {
 }
 
 type ThreadView struct {
-	ID        string `json:"id"`
-	ProjectID string `json:"projectId"`
-	Title     string `json:"title"`
-	Status    string `json:"status"`
-	CreatedAt string `json:"createdAt"`
-	UpdatedAt string `json:"updatedAt"`
-	Items     []any  `json:"items,omitempty"`
+	ID         string `json:"id"`
+	ProjectID  string `json:"projectId"`
+	ProviderID string `json:"providerId"`
+	Model      string `json:"model,omitempty"`
+	Title      string `json:"title"`
+	Status     string `json:"status"`
+	CreatedAt  string `json:"createdAt"`
+	UpdatedAt  string `json:"updatedAt"`
+	Items      []any  `json:"items,omitempty"`
+}
+
+type ProviderModel struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	ProviderID string `json:"providerId"`
+}
+
+type ProviderUsage struct {
+	ProviderID       string   `json:"providerId"`
+	Name             string   `json:"name"`
+	Authenticated    bool     `json:"authenticated"`
+	RemainingPercent *float64 `json:"remainingPercent,omitempty"`
+	ResetsAt         *int64   `json:"resetsAt,omitempty"`
+	Detail           string   `json:"detail"`
 }
 
 type TurnStart struct {
@@ -330,6 +355,75 @@ func (a *App) ListAgentProviders() []agents.ProviderStatus {
 		statuses[index].AuthStatus = a.providerAuthStatus(statuses[index])
 	}
 	return statuses
+}
+
+func (a *App) ListProviderModels(providerID string) ([]ProviderModel, error) {
+	switch providerID {
+	case "codex":
+		models, err := a.ListModels()
+		if err != nil {
+			return nil, err
+		}
+		result := make([]ProviderModel, 0, len(models))
+		for _, model := range models {
+			result = append(result, ProviderModel{ID: model.ID, Name: model.DisplayName, ProviderID: providerID})
+		}
+		return result, nil
+	case "claude":
+		return []ProviderModel{{ID: "default", Name: "Claude default", ProviderID: providerID},
+			{ID: "sonnet", Name: "Claude Sonnet", ProviderID: providerID},
+			{ID: "opus", Name: "Claude Opus", ProviderID: providerID},
+			{ID: "haiku", Name: "Claude Haiku", ProviderID: providerID}}, nil
+	case "gemini":
+		return []ProviderModel{{ID: "default", Name: "Gemini default", ProviderID: providerID},
+			{ID: "gemini-2.5-pro", Name: "Gemini 2.5 Pro", ProviderID: providerID},
+			{ID: "gemini-2.5-flash", Name: "Gemini 2.5 Flash", ProviderID: providerID}}, nil
+	case "opencode":
+		return []ProviderModel{{ID: "default", Name: "OpenCode default", ProviderID: providerID}}, nil
+	case "ollama":
+		provider, err := a.installedProvider(providerID)
+		if err != nil {
+			return nil, err
+		}
+		output, _ := commandOutput(context.Background(), "", 5*time.Second, provider.Executable, "list")
+		var result []ProviderModel
+		lines := strings.Split(output, "\n")
+		for _, line := range lines[1:] {
+			fields := strings.Fields(line)
+			if len(fields) > 0 {
+				result = append(result, ProviderModel{ID: fields[0], Name: fields[0], ProviderID: providerID})
+			}
+		}
+		return result, nil
+	default:
+		return []ProviderModel{{ID: "default", Name: "Provider default", ProviderID: providerID}}, nil
+	}
+}
+
+func (a *App) ListProviderUsage() []ProviderUsage {
+	providers := a.ListAgentProviders()
+	result := make([]ProviderUsage, 0, len(providers))
+	for _, provider := range providers {
+		if !provider.Installed {
+			continue
+		}
+		usage := ProviderUsage{ProviderID: provider.ID, Name: provider.Name,
+			Authenticated: provider.AuthStatus == "authenticated" || provider.AuthStatus == "not-required",
+			Detail:        "Quota is managed by the provider CLI"}
+		if provider.ID == "codex" {
+			if limits, err := a.GetRateLimits(); err == nil && limits.Primary != nil {
+				remaining := limits.Primary.RemainingPercent
+				resetsAt := limits.Primary.ResetsAt
+				usage.RemainingPercent = &remaining
+				usage.ResetsAt = &resetsAt
+				usage.Detail = "Codex short-term window"
+			}
+		} else if provider.ID == "ollama" {
+			usage.Detail = "Local · unlimited"
+		}
+		result = append(result, usage)
+	}
+	return result
 }
 
 func (a *App) BeginProviderLogin(providerID string) (ProviderAuthStart, error) {
@@ -1100,6 +1194,10 @@ func (a *App) ListThreads(projectID string) ([]database.Thread, error) {
 }
 
 func (a *App) StartThread(projectID string) (ThreadView, error) {
+	return a.StartAgentThread(projectID, "codex", "")
+}
+
+func (a *App) StartAgentThread(projectID, providerID, model string) (ThreadView, error) {
 	if err := a.requireDatabase(); err != nil {
 		return ThreadView{}, err
 	}
@@ -1107,7 +1205,26 @@ func (a *App) StartThread(projectID string) (ThreadView, error) {
 	if err != nil {
 		return ThreadView{}, err
 	}
-	return a.startThreadAt(projectID, project.CanonicalPath)
+	if providerID == "" || providerID == "codex" {
+		return a.startThreadAt(projectID, project.CanonicalPath)
+	}
+	provider, err := a.installedProvider(providerID)
+	if err != nil {
+		return ThreadView{}, err
+	}
+	if !provider.Runnable && providerID != "ollama" {
+		return ThreadView{}, errors.New("provider chat adapter is not available")
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	thread := database.Thread{
+		ID: newLocalID("thread"), ProjectID: projectID, ProviderID: providerID, Model: model,
+		Title: "New thread", Status: "active", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := a.store.UpsertThread(context.Background(), thread); err != nil {
+		return ThreadView{}, err
+	}
+	_ = a.store.TouchProject(context.Background(), projectID)
+	return threadView(thread), nil
 }
 
 func (a *App) startThreadAt(projectID, cwd string, writableRoots ...string) (ThreadView, error) {
@@ -1132,7 +1249,7 @@ func (a *App) startThreadAt(projectID, cwd string, writableRoots ...string) (Thr
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	thread := database.Thread{
-		ID: response.Thread.ID, ProjectID: projectID, Title: "New thread",
+		ID: response.Thread.ID, ProjectID: projectID, ProviderID: "codex", Title: "New thread",
 		Status: "active", CreatedAt: now, UpdatedAt: now,
 	}
 	if err := a.store.UpsertThread(context.Background(), thread); err != nil {
@@ -1149,6 +1266,24 @@ func (a *App) ResumeThread(threadID string) (ThreadView, error) {
 	thread, err := a.store.GetThread(context.Background(), threadID)
 	if err != nil {
 		return ThreadView{}, err
+	}
+	if thread.ProviderID != "" && thread.ProviderID != "codex" {
+		view := threadView(thread)
+		messages, messageErr := a.store.ListChatMessages(context.Background(), threadID)
+		if messageErr != nil {
+			return ThreadView{}, messageErr
+		}
+		for _, message := range messages {
+			itemType := "agentMessage"
+			if message.Role == "user" {
+				itemType = "userMessage"
+			}
+			view.Items = append(view.Items, map[string]any{
+				"id": message.ID, "type": itemType, "text": message.Text,
+				"status": message.Status, "providerId": message.ProviderID,
+			})
+		}
+		return view, nil
 	}
 	project, err := a.projects.Get(context.Background(), thread.ProjectID)
 	if err != nil {
@@ -1189,6 +1324,9 @@ func (a *App) SendMessageWithOptions(threadID, text string, options TurnOptions)
 	thread, err := a.store.GetThread(context.Background(), threadID)
 	if err != nil {
 		return TurnStart{}, err
+	}
+	if thread.ProviderID != "" && thread.ProviderID != "codex" {
+		return a.sendExternalChat(thread, text, options)
 	}
 	var response struct {
 		Turn struct {
@@ -1242,6 +1380,134 @@ func (a *App) SendMessageWithOptions(threadID, text string, options TurnOptions)
 		_ = a.store.UpdateThreadTitle(context.Background(), threadID, title)
 	}
 	return TurnStart{ThreadID: threadID, TurnID: response.Turn.ID, Status: response.Turn.Status}, nil
+}
+
+func (a *App) sendExternalChat(thread database.Thread, text string, options TurnOptions) (TurnStart, error) {
+	provider, err := a.installedProvider(thread.ProviderID)
+	if err != nil {
+		return TurnStart{}, err
+	}
+	project, err := a.projects.Get(context.Background(), thread.ProjectID)
+	if err != nil {
+		return TurnStart{}, err
+	}
+	turnID := newLocalID("turn")
+	runContext, cancel := context.WithCancel(context.Background())
+	a.chatMu.Lock()
+	a.chatCancels[turnID] = cancel
+	a.chatMu.Unlock()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	history, _ := a.store.ListChatMessages(context.Background(), thread.ID)
+	prompt := text
+	if len(history) > 0 {
+		if len(history) > 20 {
+			history = history[len(history)-20:]
+		}
+		var contextText strings.Builder
+		contextText.WriteString("Continue this project conversation.\n\nConversation so far:\n")
+		for _, message := range history {
+			contextText.WriteString(message.Role)
+			contextText.WriteString(": ")
+			contextText.WriteString(truncate(message.Text, 8000))
+			contextText.WriteString("\n\n")
+		}
+		contextText.WriteString("Current user request:\n")
+		contextText.WriteString(text)
+		prompt = contextText.String()
+	}
+	if len(options.Mentions) > 0 {
+		prompt += "\n\nExplicitly referenced project files:\n"
+		for _, mention := range options.Mentions {
+			prompt += "- " + mention.Path + "\n"
+		}
+	}
+	_ = a.store.AddChatMessage(context.Background(), database.ChatMessage{
+		ID: newLocalID("message"), ThreadID: thread.ID, ProviderID: thread.ProviderID,
+		Role: "user", Text: text, Status: "completed", CreatedAt: now,
+	})
+	model := options.Model
+	if model == "" {
+		model = thread.Model
+	}
+	args, err := providerChatArgs(thread.ProviderID, model, prompt, options.Mode)
+	if err != nil {
+		return TurnStart{}, err
+	}
+	if thread.Title == "" || thread.Title == "New thread" {
+		title := text
+		if len([]rune(title)) > 64 {
+			title = string([]rune(title)[:64]) + "…"
+		}
+		_ = a.store.UpdateThreadTitle(context.Background(), thread.ID, title)
+	}
+	go func() {
+		defer func() {
+			a.chatMu.Lock()
+			delete(a.chatCancels, turnID)
+			a.chatMu.Unlock()
+			cancel()
+		}()
+		output, commandErr := commandOutput(runContext, project.CanonicalPath, 30*time.Minute,
+			provider.Executable, args...)
+		status := "completed"
+		if commandErr != nil {
+			status = "failed"
+			if strings.TrimSpace(output) == "" {
+				output = commandErr.Error()
+			}
+		}
+		messageID := newLocalID("message")
+		_ = a.store.AddChatMessage(context.Background(), database.ChatMessage{
+			ID: messageID, ThreadID: thread.ID, ProviderID: thread.ProviderID,
+			Role: "assistant", Text: strings.TrimSpace(output), Status: status,
+			CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		})
+		runtime.EventsEmit(a.ctx, "codex:item", map[string]any{
+			"event": "completed", "payload": map[string]any{
+				"threadId": thread.ID, "turnId": turnID,
+				"item": map[string]any{"id": messageID, "type": "agentMessage",
+					"text": strings.TrimSpace(output), "status": status, "providerId": thread.ProviderID},
+			},
+		})
+		runtime.EventsEmit(a.ctx, "codex:turn-completed", map[string]any{"threadId": thread.ID, "turnId": turnID})
+	}()
+	return TurnStart{ThreadID: thread.ID, TurnID: turnID, Status: "inProgress"}, nil
+}
+
+func providerChatArgs(providerID, model, prompt, mode string) ([]string, error) {
+	switch providerID {
+	case "claude":
+		args := []string{"-p", prompt, "--output-format", "text", "--permission-mode", "acceptEdits"}
+		if mode == "plan" {
+			args[len(args)-1] = "plan"
+		}
+		if model != "" && model != "default" {
+			args = append(args, "--model", model)
+		}
+		return args, nil
+	case "gemini":
+		args := []string{"-p", prompt, "--output-format", "text", "--approval-mode", "auto_edit"}
+		if mode == "plan" {
+			args[len(args)-1] = "plan"
+		}
+		if model != "" && model != "default" {
+			args = append(args, "--model", model)
+		}
+		return args, nil
+	case "opencode":
+		args := []string{"run", prompt}
+		if model != "" && model != "default" {
+			args = append(args, "--model", model)
+		}
+		return args, nil
+	case "ollama":
+		if model == "" || model == "default" {
+			return nil, errors.New("select an installed Ollama model")
+		}
+		return []string{"run", model, prompt}, nil
+	default:
+		return nil, errors.New("provider has no workspace chat adapter")
+	}
 }
 
 func planDeveloperInstructions(mode string) any {
@@ -1451,6 +1717,13 @@ func (a *App) ImportThread(projectID string) (ThreadView, error) {
 }
 
 func (a *App) InterruptTurn(threadID, turnID string) error {
+	a.chatMu.Lock()
+	cancel := a.chatCancels[turnID]
+	a.chatMu.Unlock()
+	if cancel != nil {
+		cancel()
+		return nil
+	}
 	return a.call("turn/interrupt", map[string]any{"threadId": threadID, "turnId": turnID}, nil)
 }
 
@@ -1851,7 +2124,7 @@ func (a *App) requireDatabase() error {
 
 func threadView(thread database.Thread) ThreadView {
 	return ThreadView{
-		ID: thread.ID, ProjectID: thread.ProjectID, Title: thread.Title,
+		ID: thread.ID, ProjectID: thread.ProjectID, ProviderID: thread.ProviderID, Model: thread.Model, Title: thread.Title,
 		Status: thread.Status, CreatedAt: thread.CreatedAt, UpdatedAt: thread.UpdatedAt,
 	}
 }

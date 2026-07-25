@@ -13,6 +13,8 @@ declare global {
           GetRateLimits(): Promise<unknown>
           ListModels(): Promise<unknown>
           ListAgentProviders(): Promise<unknown>
+          ListProviderModels(providerId: string): Promise<unknown>
+          ListProviderUsage(): Promise<unknown>
           BeginProviderLogin(providerId: string): Promise<unknown>
           StartProviderConsole(
             providerId: string,
@@ -58,6 +60,7 @@ declare global {
           RemoveProject(id: string): Promise<void>
           ListThreads(projectId: string): Promise<unknown>
           StartThread(projectId: string): Promise<unknown>
+          StartAgentThread(projectId: string, providerId: string, model: string): Promise<unknown>
           ResumeThread(threadId: string): Promise<unknown>
           SendMessage(threadId: string, text: string): Promise<unknown>
           SendMessageWithOptions(threadId: string, text: string, options: unknown): Promise<unknown>
