@@ -1034,6 +1034,21 @@ function backendOpen(path: string) {
                 Parallel jury
               </button>
             </div>
+            <div class="workflow-behavior" :data-mode="taskWorkflow">
+              <strong>{{
+                taskWorkflow === 'delivery'
+                  ? 'Code starts after plan approval'
+                  : 'Selected agents start immediately'
+              }}</strong>
+              <p v-if="taskWorkflow === 'delivery'">
+                Planner runs first without editing. Review its plan in the pipeline, then press
+                “Approve next stage”. The implementer starts writing code only after that approval.
+              </p>
+              <p v-else>
+                All selected roles launch in parallel. Implementer roles may begin editing their
+                isolated worktrees immediately; reviewers produce independent evidence.
+              </p>
+            </div>
           </div>
           <div>
             <span class="builder-label">Agent roles</span>

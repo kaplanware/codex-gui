@@ -1212,6 +1212,7 @@ func (a *App) StartAgentThread(projectID, providerID, model string) (ThreadView,
 
 func (a *App) startThreadAt(projectID, cwd string, writableRoots ...string) (ThreadView, error) {
 	var response struct {
+		Model  string `json:"model"`
 		Thread struct {
 			ID        string `json:"id"`
 			CreatedAt int64  `json:"createdAt"`
@@ -1233,7 +1234,7 @@ func (a *App) startThreadAt(projectID, cwd string, writableRoots ...string) (Thr
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	thread := database.Thread{
 		ID: response.Thread.ID, ProjectID: projectID, ProviderID: "mixed", Title: "New thread",
-		Status: "active", CreatedAt: now, UpdatedAt: now,
+		Model: response.Model, Status: "active", CreatedAt: now, UpdatedAt: now,
 	}
 	if err := a.store.UpsertThread(context.Background(), thread); err != nil {
 		return ThreadView{}, err
@@ -1345,17 +1346,33 @@ func (a *App) SendMessageWithOptions(threadID, text string, options TurnOptions)
 		"threadId": threadID,
 		"input":    input,
 	}
-	if options.Model != "" {
-		params["model"] = options.Model
+	model := options.Model
+	if model == "" {
+		model = thread.Model
 	}
+	if model == "" {
+		models, modelErr := a.ListModels()
+		if modelErr != nil {
+			return TurnStart{}, fmt.Errorf("resolve Codex model: %w", modelErr)
+		}
+		for _, candidate := range models {
+			if candidate.IsDefault {
+				model = candidate.ID
+				break
+			}
+		}
+		if model == "" && len(models) > 0 {
+			model = models[0].ID
+		}
+	}
+	if model == "" || model == "default" {
+		return TurnStart{}, errors.New("Codex did not provide a supported model")
+	}
+	params["model"] = model
 	if options.Effort != "" {
 		params["effort"] = options.Effort
 	}
 	if options.Mode == "plan" || options.Mode == "default" {
-		model := options.Model
-		if model == "" {
-			model = "default"
-		}
 		params["collaborationMode"] = map[string]any{
 			"mode": options.Mode,
 			"settings": map[string]any{
@@ -1857,7 +1874,7 @@ func (a *App) startCodexAgentRun(task database.Task, run database.AgentRun) erro
 	if run.Role == "planner" {
 		mode = "plan"
 	}
-	turn, err := a.SendMessageWithOptions(thread.ID, prompt, TurnOptions{Mode: mode})
+	turn, err := a.SendMessageWithOptions(thread.ID, prompt, TurnOptions{Mode: mode, Model: thread.Model})
 	if err != nil {
 		return err
 	}
@@ -1976,7 +1993,7 @@ func (a *App) createRunWorktree(project database.Project, run database.AgentRun)
 	return target, nil
 }
 
-func (a *App) completeAgentRun(turnID string) {
+func (a *App) completeAgentRun(turnID, status, summary string) {
 	a.runMu.Lock()
 	reference, ok := a.turnRuns[turnID]
 	if ok {
@@ -1986,12 +2003,18 @@ func (a *App) completeAgentRun(turnID string) {
 	if !ok {
 		return
 	}
-	a.finalizeAgentRun(reference, "completed", "Run completed")
+	if status == "" {
+		status = "completed"
+	}
+	if summary == "" {
+		summary = "Run completed"
+	}
+	a.finalizeAgentRun(reference, status, summary)
 }
 
 func (a *App) finalizeAgentRun(reference runReference, status, summary string) {
 	progress := 100
-	if status == "failed" {
+	if status == "failed" || status == "cancelled" {
 		progress = 0
 	}
 	_ = a.store.UpdateRun(context.Background(), reference.RunID, status, progress, summary, "")
@@ -2004,7 +2027,7 @@ func (a *App) finalizeAgentRun(reference runReference, status, summary string) {
 		return
 	}
 	if task.Mode == "delivery" {
-		if status == "failed" {
+		if status == "failed" || status == "cancelled" {
 			_ = a.store.UpdateTaskStatus(context.Background(), reference.TaskID, "failed")
 			a.emitAgentTasksChanged()
 			return
@@ -2051,7 +2074,7 @@ func (a *App) finalizeAgentRun(reference runReference, status, summary string) {
 	if allTerminal {
 		taskStatus := "completed"
 		for _, run := range runs {
-			if run.Status == "failed" || run.Status == "unavailable" {
+			if run.Status == "failed" || run.Status == "cancelled" || run.Status == "unavailable" {
 				taskStatus = "completed-with-findings"
 				break
 			}
@@ -2176,7 +2199,18 @@ func (a *App) handleProtocolMessage(method string, id, params []byte) {
 	case "turn/completed":
 		emit("codex:turn-completed", payload)
 		if turnID := nestedString(payload, "turn", "id"); turnID != "" {
-			go a.completeAgentRun(turnID)
+			turnStatus := nestedString(payload, "turn", "status")
+			runStatus, summary := "completed", "Run completed"
+			if turnStatus == "failed" {
+				runStatus = "failed"
+				summary = nestedString(payload, "turn", "error", "message")
+				if summary == "" {
+					summary = "Codex turn failed"
+				}
+			} else if turnStatus == "interrupted" {
+				runStatus, summary = "cancelled", "Codex turn was interrupted"
+			}
+			go a.completeAgentRun(turnID, runStatus, summary)
 		}
 	case "item/started", "item/updated", "item/completed":
 		emit("codex:item", map[string]any{"event": method, "payload": payload})

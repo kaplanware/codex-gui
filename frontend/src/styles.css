@@ -1868,6 +1868,30 @@ pre {
   padding: 10px;
 }
 
+.workflow-behavior {
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 9px;
+  padding: 9px 10px;
+  background: var(--panel-2);
+}
+
+.workflow-behavior[data-mode='delivery'] {
+  border-left-color: var(--warning);
+}
+
+.workflow-behavior strong {
+  font-size: 0.65rem;
+}
+
+.workflow-behavior p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.59rem;
+  line-height: 1.45;
+}
+
 .coordination-overlay {
   position: fixed;
   z-index: 28;
