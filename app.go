@@ -2013,10 +2013,20 @@ func (a *App) finalizeAgentRun(reference runReference, status, summary string) {
 			if run.ID == reference.RunID && run.Role == "planner" {
 				_ = a.store.UpdateTaskStatus(context.Background(), reference.TaskID, "waiting-approval")
 				timestamp := time.Now().UTC().Format(time.RFC3339Nano)
+				planContent := "Open the planner thread to review the complete plan, then approve the next workflow stage."
+				if artifacts, artifactErr := a.store.ListArtifacts(context.Background(), reference.TaskID); artifactErr == nil {
+					for _, artifact := range artifacts {
+						if artifact.RunID == reference.RunID && artifact.Type == "agent-output" &&
+							strings.TrimSpace(artifact.Content) != "" {
+							planContent = artifact.Content
+							break
+						}
+					}
+				}
 				_ = a.store.CreateArtifact(context.Background(), database.Artifact{
 					ID: newLocalID("plan"), TaskID: reference.TaskID, RunID: reference.RunID,
 					Type: "plan", Title: "Implementation plan", Status: "needs-review",
-					Content:   "Open the planner thread to review the complete plan, then approve the next workflow stage.",
+					Content:   planContent,
 					CreatedAt: timestamp, UpdatedAt: timestamp,
 				})
 				a.emitAgentTasksChanged()

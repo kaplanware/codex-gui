@@ -27,6 +27,8 @@ const memoryTitle = ref('')
 const memoryContent = ref('')
 const coordinationTaskId = ref('')
 const coordinationDraft = ref('')
+const selectedTaskId = ref('')
+const selectedArtifactId = ref('')
 const setupProvider = ref<AgentProvider | null>(null)
 const consoleProvider = ref<AgentProvider | null>(null)
 const consoleElement = ref<HTMLElement | null>(null)
@@ -237,6 +239,7 @@ async function proposeMemory() {
 }
 
 async function openCoordination(taskId: string) {
+  selectedTaskId.value = ''
   coordinationTaskId.value = taskId
   await workspace.loadCoordination(taskId)
 }
@@ -344,6 +347,37 @@ function providerInstallCommand(providerId: string) {
 const coordinationTask = computed(() =>
   workspace.agentTasks.find((bundle) => bundle.task.id === coordinationTaskId.value),
 )
+
+const selectedTask = computed(() =>
+  workspace.agentTasks.find((bundle) => bundle.task.id === selectedTaskId.value),
+)
+
+const selectedArtifact = computed(() => {
+  const artifacts = selectedTask.value?.artifacts ?? []
+  return (
+    artifacts.find((artifact) => artifact.id === selectedArtifactId.value) ??
+    artifacts.find((artifact) => artifact.type === 'plan') ??
+    artifacts[0]
+  )
+})
+
+function openTaskDetail(taskId: string) {
+  selectedTaskId.value = taskId
+  const bundle = workspace.agentTasks.find((candidate) => candidate.task.id === taskId)
+  selectedArtifactId.value =
+    bundle?.artifacts.find((artifact) => artifact.type === 'plan')?.id ??
+    bundle?.artifacts[0]?.id ??
+    ''
+  void workspace.loadCoordination(taskId)
+}
+
+function readableArtifact(content: string) {
+  try {
+    return JSON.stringify(JSON.parse(content), null, 2)
+  } catch {
+    return content
+  }
+}
 
 const activeRuns = computed(() =>
   workspace.agentTasks.flatMap((bundle) => bundle.runs).filter((run) => run.status === 'running'),
@@ -836,6 +870,47 @@ function backendOpen(path: string) {
         </article>
       </div>
 
+      <section class="pipeline-board">
+        <header>
+          <div>
+            <p class="eyebrow">Workflow control</p>
+            <h2>Task pipelines</h2>
+          </div>
+          <span>Click a pipeline to inspect agent output, artifacts, worktrees, and evidence.</span>
+        </header>
+        <div class="pipeline-list">
+          <button
+            v-for="bundle in workspace.agentTasks"
+            :key="bundle.task.id"
+            type="button"
+            @click="openTaskDetail(bundle.task.id)"
+          >
+            <span class="pipeline-state" :data-status="bundle.task.status"></span>
+            <span class="pipeline-copy">
+              <strong>{{ bundle.task.title }}</strong>
+              <small>{{ bundle.task.mode }} · {{ bundle.artifacts.length }} artifacts</small>
+            </span>
+            <span class="pipeline-stages">
+              <span
+                v-for="run in bundle.runs"
+                :key="run.id"
+                :data-status="run.status"
+                :title="`${run.role} · ${run.providerId} · ${run.status}`"
+              >
+                <b>{{ run.role.slice(0, 1).toUpperCase() }}</b>
+                <small>{{ run.status }}</small>
+              </span>
+            </span>
+            <strong class="pipeline-result" :data-status="bundle.task.status">
+              {{ bundle.task.status }}
+            </strong>
+          </button>
+          <div v-if="!workspace.agentTasks.length" class="mission-empty">
+            No workflows yet. Configure roles and launch a pipeline from the task builder.
+          </div>
+        </div>
+      </section>
+
       <div class="mission-layout">
         <section class="mission-main">
           <div class="agent-table">
@@ -846,8 +921,8 @@ function backendOpen(path: string) {
               <article
                 v-for="run in bundle.runs"
                 :key="run.id"
-                :class="{ clickable: !!run.threadId }"
-                @click="openRunThread(run.threadId)"
+                class="clickable"
+                @click="openTaskDetail(bundle.task.id)"
               >
                 <div>
                   <strong>{{ run.role }}</strong><small>{{ run.summary || 'Waiting for activity' }}</small>
@@ -1090,6 +1165,106 @@ function backendOpen(path: string) {
           <button class="secondary-button" type="button" @click="closeProviderConsole">
             Close console
           </button>
+        </footer>
+      </section>
+    </article>
+
+    <article v-if="selectedTask" class="task-detail-overlay">
+      <section class="task-detail-panel">
+        <header>
+          <div>
+            <p class="eyebrow">{{ selectedTask.task.mode }} pipeline</p>
+            <h2>{{ selectedTask.task.title }}</h2>
+            <span>{{ selectedTask.task.status }} · {{ selectedTask.runs.length }} agent stages</span>
+          </div>
+          <button type="button" aria-label="Close task detail" @click="selectedTaskId = ''">×</button>
+        </header>
+
+        <div class="task-detail-objective">
+          <span>Objective</span>
+          <p>{{ selectedTask.task.prompt }}</p>
+        </div>
+
+        <div class="task-detail-body">
+          <aside class="task-stage-list">
+            <h3>Pipeline stages</h3>
+            <article
+              v-for="(run, index) in selectedTask.runs"
+              :key="run.id"
+              :data-status="run.status"
+            >
+              <span class="stage-index">{{ index + 1 }}</span>
+              <div>
+                <strong>{{ run.role }}</strong>
+                <small>{{ workspace.agentProviders.find((provider) => provider.id === run.providerId)?.name || run.providerId }}</small>
+                <p>{{ run.summary || 'Waiting for activity' }}</p>
+                <em v-if="run.worktree">{{ run.worktree }}</em>
+              </div>
+              <div class="stage-state">
+                <span>{{ run.status }}</span>
+                <progress :value="run.progress" max="100"></progress>
+                <button
+                  v-if="run.threadId"
+                  type="button"
+                  @click="openRunThread(run.threadId); selectedTaskId = ''"
+                >
+                  Open session
+                </button>
+              </div>
+            </article>
+          </aside>
+
+          <section class="task-evidence">
+            <header>
+              <div>
+                <h3>Artifacts & evidence</h3>
+                <span>Plans, agent output, snapshots, diffs, and verification reports.</span>
+              </div>
+              <strong>{{ selectedTask.artifacts.length }}</strong>
+            </header>
+            <div class="artifact-tabs">
+              <button
+                v-for="artifact in selectedTask.artifacts"
+                :key="artifact.id"
+                type="button"
+                :class="{ active: selectedArtifact?.id === artifact.id }"
+                :data-status="artifact.status"
+                @click="selectedArtifactId = artifact.id"
+              >
+                <strong>{{ artifact.title }}</strong>
+                <small>{{ artifact.type }} · {{ artifact.status }}</small>
+              </button>
+            </div>
+            <pre v-if="selectedArtifact" class="artifact-content">{{
+              readableArtifact(selectedArtifact.content)
+            }}</pre>
+            <div v-else class="mission-empty">No evidence has been generated yet.</div>
+          </section>
+        </div>
+
+        <footer>
+          <div>
+            <span>{{ (workspace.coordinationByTask[selectedTask.task.id] ?? []).length }} coordination events</span>
+            <button type="button" @click="openCoordination(selectedTask.task.id)">
+              Open shared task bus
+            </button>
+          </div>
+          <div>
+            <button type="button" @click="workspace.createTaskSnapshot(selectedTask.task.id)">
+              Snapshot
+            </button>
+            <button type="button" @click="workspace.verifyTask(selectedTask.task.id)">
+              Run verification
+            </button>
+            <button
+              v-if="selectedTask.task.status === 'waiting-approval'"
+              class="primary-button"
+              type="button"
+              @click="workspace.approveTaskStage(selectedTask.task.id)"
+            >
+              Approve next stage
+            </button>
+          </div>
         </footer>
       </section>
     </article>
