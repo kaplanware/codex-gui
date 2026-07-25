@@ -878,6 +878,13 @@ function backendOpen(path: string) {
           </div>
           <span>Click a pipeline to inspect agent output, artifacts, worktrees, and evidence.</span>
         </header>
+        <div class="pipeline-explainer">
+          <span><b>1</b> Objective</span><i>→</i>
+          <span><b>2</b> Agent plan</span><i>→</i>
+          <span><b>3</b> Approval</span><i>→</i>
+          <span><b>4</b> Implementation</span><i>→</i>
+          <span><b>5</b> Review & evidence</span>
+        </div>
         <div class="pipeline-list">
           <button
             v-for="bundle in workspace.agentTasks"
@@ -986,47 +993,6 @@ function backendOpen(path: string) {
               >
                 Propose memory
               </button>
-            </article>
-          </div>
-
-          <div class="task-capsules">
-            <article v-for="bundle in workspace.agentTasks" :key="bundle.task.id">
-              <header>
-                <div>
-                  <span>{{ bundle.task.mode }} workflow</span>
-                  <h3>{{ bundle.task.title }}</h3>
-                </div>
-                <strong :data-status="bundle.task.status">{{ bundle.task.status }}</strong>
-              </header>
-              <p>{{ bundle.task.prompt }}</p>
-              <div class="artifact-row">
-                <span
-                  v-for="artifact in bundle.artifacts"
-                  :key="artifact.id"
-                  :title="artifact.content"
-                >{{ artifact.type }} · {{ artifact.status }}</span>
-                <em v-if="!bundle.artifacts.length">No artifacts yet</em>
-              </div>
-              <footer>
-                <button
-                  v-if="bundle.task.status === 'waiting-approval'"
-                  class="approve-stage"
-                  type="button"
-                  @click="workspace.approveTaskStage(bundle.task.id)"
-                >
-                  Approve next stage
-                </button>
-                <button type="button" @click="workspace.createTaskSnapshot(bundle.task.id)">
-                  Snapshot
-                </button>
-                <button type="button" @click="workspace.createTaskWorktree(bundle.task.id)">
-                  Isolated worktree
-                </button>
-                <button type="button" @click="workspace.verifyTask(bundle.task.id)">
-                  Run verification
-                </button>
-                <button type="button" @click="openCoordination(bundle.task.id)">Shared task</button>
-              </footer>
             </article>
           </div>
         </section>
