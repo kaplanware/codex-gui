@@ -32,6 +32,12 @@ interface QueuedMessage {
   options: TurnOptions
 }
 
+interface PlanArtifact {
+  text: string
+  status: 'needs_review' | 'approved' | 'revision_requested'
+  createdAt: string
+}
+
 export const useWorkspaceStore = defineStore('workspace', {
   state: () => ({
     account: null as Account | null,
@@ -40,6 +46,8 @@ export const useWorkspaceStore = defineStore('workspace', {
     selectedModel: '',
     selectedEffort: '',
     selectedMode: 'default' as 'default' | 'plan',
+    planArtifact: null as PlanArtifact | null,
+    lastTurnMode: 'default' as 'default' | 'plan',
     projects: [] as Project[],
     threadsByProject: {} as Record<string, Thread[]>,
     expandedProjects: {} as Record<string, boolean>,
@@ -107,6 +115,18 @@ export const useWorkspaceStore = defineStore('workspace', {
           if (item) item.aggregatedOutput = `${item.aggregatedOutput ?? ''}${event.delta}`
         }),
         subscribe('codex:turn-completed', () => {
+          if (this.lastTurnMode === 'plan') {
+            const plan = [...this.items]
+              .reverse()
+              .find((item) => item.type === 'agentMessage' && item.text?.trim())
+            if (plan?.text) {
+              this.planArtifact = {
+                text: plan.text,
+                status: 'needs_review',
+                createdAt: new Date().toISOString(),
+              }
+            }
+          }
           this.activeTurn = null
           this.sending = false
           if (this.activeProject) void this.loadThreads(this.activeProject.id)
@@ -305,6 +325,7 @@ export const useWorkspaceStore = defineStore('workspace', {
       const localItem = this.items.find((item) => item.id === entry.id)
       if (localItem) localItem.status = 'sending'
       try {
+        this.lastTurnMode = entry.options.mode ?? 'default'
         this.activeTurn = await backend.sendMessageWithOptions(
           this.activeThread.id,
           entry.text,
@@ -322,6 +343,23 @@ export const useWorkspaceStore = defineStore('workspace', {
       if (this.activeTurn || this.sending || !this.queue.length) return
       const next = this.queue.shift()
       if (next) await this.sendNow(next)
+    },
+    async approvePlan() {
+      if (!this.planArtifact) return
+      this.planArtifact.status = 'approved'
+      this.selectedMode = 'default'
+      await this.send(
+        'Implement the approved plan now. Follow it step by step, preserve unrelated changes, and run every verification listed in the plan before reporting completion.',
+      )
+    },
+    async revisePlan(feedback: string) {
+      if (!this.planArtifact || !feedback.trim()) return
+      this.planArtifact.status = 'revision_requested'
+      this.selectedMode = 'plan'
+      await this.send(`Revise the plan using this review feedback. Do not implement yet:\n\n${feedback}`)
+    },
+    closePlanReview() {
+      this.planArtifact = null
     },
     async interrupt() {
       if (!this.activeTurn) return

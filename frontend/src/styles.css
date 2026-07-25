@@ -132,6 +132,7 @@ pre {
 }
 
 .header-actions {
+  position: relative;
   gap: 10px;
 }
 
@@ -141,6 +142,56 @@ pre {
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--panel);
+}
+
+.usage-popover {
+  position: absolute;
+  z-index: 40;
+  top: 43px;
+  right: 0;
+  display: grid;
+  width: 330px;
+  gap: 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 16px;
+  background: var(--panel-2);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.48);
+}
+
+.popover-heading,
+.usage-window {
+  display: grid;
+  gap: 5px;
+}
+
+.popover-heading {
+  grid-template-columns: 1fr auto;
+}
+
+.popover-heading small,
+.usage-window span,
+.usage-window small,
+.usage-popover p {
+  color: var(--muted);
+  font-size: 0.67rem;
+}
+
+.popover-heading button {
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+}
+
+.usage-window progress {
+  width: 100%;
+  height: 6px;
+  accent-color: var(--accent);
+}
+
+.usage-popover p {
+  margin: 0;
+  line-height: 1.5;
 }
 
 .usage-chip {
@@ -518,6 +569,7 @@ pre {
 }
 
 .file-link {
+  position: relative;
   display: inline;
   border: 0;
   padding: 0;
@@ -527,7 +579,32 @@ pre {
   text-decoration: underline;
 }
 
+.file-link::after {
+  position: absolute;
+  z-index: 12;
+  bottom: calc(100% + 8px);
+  left: 0;
+  display: none;
+  width: max-content;
+  max-width: 420px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 7px 9px;
+  color: var(--text);
+  content: attr(data-tooltip);
+  background: #080b10;
+  font-size: 0.66rem;
+  text-decoration: none;
+  white-space: normal;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+
+.file-link:hover::after {
+  display: block;
+}
+
 .composer {
+  position: relative;
   margin: 0 clamp(15px, 4vw, 42px) 17px;
   border: 1px solid var(--border);
   border-radius: 13px;
@@ -555,9 +632,10 @@ pre {
   position: absolute;
   z-index: 10;
   display: grid;
-  width: min(520px, calc(100% - 20px));
+  bottom: calc(100% + 8px);
+  left: 0;
+  width: min(520px, 100%);
   max-height: 230px;
-  transform: translateY(calc(-100% - 48px));
   overflow: auto;
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -608,14 +686,96 @@ pre {
   margin: 5px 4px 0;
 }
 
-.turn-controls select {
-  min-width: 110px;
+.model-control {
+  position: relative;
+}
+
+.control-trigger {
+  display: flex;
+  min-width: 170px;
+  align-items: center;
+  gap: 7px;
   border: 1px solid var(--border);
-  border-radius: 7px;
-  padding: 5px 7px;
+  border-radius: 9px;
+  padding: 6px 9px;
   color: var(--muted);
   background: var(--panel);
   font-size: 0.65rem;
+}
+
+.control-trigger strong {
+  color: var(--text);
+}
+
+.control-trigger b {
+  margin-left: auto;
+}
+
+.model-menu {
+  position: absolute;
+  z-index: 15;
+  bottom: calc(100% + 7px);
+  display: grid;
+  width: 320px;
+  max-height: 280px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  padding: 5px;
+  background: var(--panel-2);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+}
+
+.model-menu button {
+  display: grid;
+  gap: 3px;
+  border: 0;
+  border-radius: 8px;
+  padding: 9px;
+  text-align: left;
+  background: transparent;
+}
+
+.model-menu button:hover,
+.model-menu button.active {
+  background: var(--panel-3);
+}
+
+.model-menu small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.62rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.segmented-control {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 2px;
+  background: var(--panel);
+}
+
+.segmented-control button {
+  border: 0;
+  border-radius: 6px;
+  padding: 5px 8px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 0.62rem;
+  text-transform: capitalize;
+}
+
+.segmented-control button.active {
+  color: var(--text);
+  background: var(--panel-3);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.mode-control button.active:last-child {
+  color: #071610;
+  background: var(--accent);
 }
 
 .composer-footer {
@@ -814,6 +974,118 @@ pre {
   padding: 30px;
   background: rgba(6, 8, 12, 0.74);
   backdrop-filter: blur(5px);
+}
+
+.plan-review-overlay {
+  position: fixed;
+  z-index: 25;
+  display: grid;
+  inset: 0;
+  place-items: center;
+  padding: 30px;
+  background: rgba(6, 8, 12, 0.78);
+  backdrop-filter: blur(7px);
+}
+
+.plan-review {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(1100px, 96vw);
+  height: min(780px, 92vh);
+  border: 1px solid #3b4554;
+  border-radius: 17px;
+  overflow: hidden;
+  background: var(--panel-2);
+  box-shadow: 0 30px 100px rgba(0, 0, 0, 0.58);
+}
+
+.plan-review > header,
+.plan-review > footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 21px;
+}
+
+.plan-review > header {
+  border-bottom: 1px solid var(--border);
+}
+
+.plan-review > header h2 {
+  margin-bottom: 4px;
+}
+
+.plan-review > header span,
+.plan-review-body aside small {
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.plan-review > header > button {
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+  font-size: 1.3rem;
+}
+
+.plan-review-body {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  min-height: 0;
+}
+
+.plan-review-body aside {
+  border-right: 1px solid var(--border);
+  padding: 20px;
+}
+
+.plan-review-body ol {
+  display: grid;
+  gap: 14px;
+  margin: 20px 0;
+  padding-left: 20px;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.plan-review-body li.done {
+  color: var(--accent);
+}
+
+.plan-review-body li.active {
+  color: var(--text);
+  font-weight: 750;
+}
+
+.plan-document {
+  overflow: auto;
+  padding: 24px;
+}
+
+.plan-document pre {
+  font-family: inherit;
+  font-size: 0.8rem;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+.plan-review > footer {
+  border-top: 1px solid var(--border);
+}
+
+.plan-review > footer textarea {
+  flex: 1;
+  resize: none;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 9px;
+  background: var(--panel);
+}
+
+.plan-review > footer > div {
+  display: flex;
+  gap: 8px;
 }
 
 .approval-card {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/url"
 	"os"
@@ -444,7 +445,7 @@ func (a *App) SendMessageWithOptions(threadID, text string, options TurnOptions)
 			"mode": options.Mode,
 			"settings": map[string]any{
 				"model": model, "reasoning_effort": nullIfEmptyString(options.Effort),
-				"developer_instructions": nil,
+				"developer_instructions": planDeveloperInstructions(options.Mode),
 			},
 		}
 	}
@@ -462,6 +463,13 @@ func (a *App) SendMessageWithOptions(threadID, text string, options TurnOptions)
 	return TurnStart{ThreadID: threadID, TurnID: response.Turn.ID, Status: response.Turn.Status}, nil
 }
 
+func planDeveloperInstructions(mode string) any {
+	if mode != "plan" {
+		return nil
+	}
+	return `You are in a strict planning phase. Inspect the repository as needed, but do not modify files, run destructive commands, or implement the request. Produce a decision-ready implementation plan with: objective and assumptions; current-state findings; affected files and components; ordered implementation steps; risks and mitigations; verification plan; rollback plan; and explicit questions only when genuinely blocking. End with a concise approval checklist.`
+}
+
 func (a *App) SearchProjectFiles(projectID, query string) ([]FileMatch, error) {
 	if err := a.requireDatabase(); err != nil {
 		return nil, err
@@ -470,28 +478,43 @@ func (a *App) SearchProjectFiles(projectID, query string) ([]FileMatch, error) {
 	if err != nil {
 		return nil, err
 	}
-	var response struct {
-		Files []struct {
-			Root     string `json:"root"`
-			Path     string `json:"path"`
-			FileName string `json:"file_name"`
-			Score    int64  `json:"score"`
-		} `json:"files"`
+	needle := strings.ToLower(strings.TrimSpace(query))
+	matches := make([]FileMatch, 0, 64)
+	skip := map[string]bool{
+		".git": true, "node_modules": true, "vendor": true, "dist": true,
+		"build": true, ".idea": true, ".vscode": true,
 	}
-	if err := a.call("fuzzyFileSearch", map[string]any{
-		"query": query, "roots": []string{project.CanonicalPath}, "cancellationToken": nil,
-	}, &response); err != nil {
-		return nil, err
-	}
-	matches := make([]FileMatch, 0, len(response.Files))
-	for _, file := range response.Files {
-		relative, err := filepath.Rel(project.CanonicalPath, file.Path)
-		if err != nil || strings.HasPrefix(relative, "..") {
-			continue
+	err = filepath.WalkDir(project.CanonicalPath, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if entry.IsDir() {
+			if path != project.CanonicalPath && skip[entry.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		relative, relativeErr := filepath.Rel(project.CanonicalPath, path)
+		if relativeErr != nil {
+			return nil
+		}
+		relative = filepath.ToSlash(relative)
+		lower := strings.ToLower(relative)
+		index := strings.Index(lower, needle)
+		if needle != "" && index < 0 {
+			return nil
+		}
+		score := int64(1000 - index*5 - len(relative))
+		if strings.HasPrefix(strings.ToLower(entry.Name()), needle) {
+			score += 500
 		}
 		matches = append(matches, FileMatch{
-			Name: file.FileName, Path: file.Path, RelativePath: filepath.ToSlash(relative), Score: file.Score,
+			Name: entry.Name(), Path: path, RelativePath: relative, Score: score,
 		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	sort.SliceStable(matches, func(i, j int) bool { return matches[i].Score > matches[j].Score })
 	if len(matches) > 20 {

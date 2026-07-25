@@ -11,6 +11,9 @@ const workspace = useWorkspaceStore()
 const prompt = ref('')
 const conversation = ref<HTMLElement | null>(null)
 const showDiagnostics = ref(false)
+const showUsage = ref(false)
+const showModelMenu = ref(false)
+const planFeedback = ref('')
 const userAnswers = ref<Record<string, string[]>>({})
 const elicitationValues = ref<Record<string, unknown>>({})
 let fileSearchTimer: number | undefined
@@ -82,14 +85,33 @@ function selectFile(match: FileMatch) {
 }
 
 function messageSegments(text: string) {
-  return text.split(/(@[A-Za-z0-9_./-]+)/g).map((value) => ({
-    value,
-    file: value.startsWith('@') ? value.slice(1) : '',
-  }))
+  return text.split(/(`[^`\n]*[/.][^`\n]*`|@[A-Za-z0-9_./-]+)/g).map((value) => {
+    const candidate = value.startsWith('@')
+      ? value.slice(1)
+      : value.startsWith('`')
+        ? value.slice(1, -1)
+        : ''
+    const file = candidate && !candidate.includes('://') ? candidate.replace(/^\.\//, '') : ''
+    return { value, file }
+  })
 }
 
 function openLinkedFile(path: string) {
   if (workspace.activeProject) void backend.openProjectFile(workspace.activeProject.id, path)
+}
+
+function linkedAddress(path: string) {
+  return workspace.activeProject ? `${workspace.activeProject.path}/${path}` : path
+}
+
+function formatReset(timestamp?: number) {
+  if (!timestamp) return 'Not reported'
+  return new Date(timestamp * 1000).toLocaleString()
+}
+
+async function requestPlanRevision() {
+  await workspace.revisePlan(planFeedback.value)
+  planFeedback.value = ''
 }
 
 function chooseAnswer(questionId: string, value: string) {
@@ -162,10 +184,30 @@ function backendOpen(path: string) {
           v-if="usageLabel"
           class="usage-chip"
           type="button"
-          @click="workspace.loadRateLimits"
+          @click="showUsage = !showUsage"
         >
           {{ usageLabel }}
         </button>
+        <div v-if="showUsage" class="usage-popover">
+          <div class="popover-heading">
+            <div><small>Usage limits</small><strong>{{ workspace.rateLimits?.limitName || 'Codex' }}</strong></div>
+            <button type="button" @click="showUsage = false">×</button>
+          </div>
+          <div v-if="workspace.rateLimits?.primary" class="usage-window">
+            <span>Short-term window</span>
+            <strong>{{ Math.round(workspace.rateLimits.primary.remainingPercent) }}% left</strong>
+            <progress :value="workspace.rateLimits.primary.remainingPercent" max="100"></progress>
+            <small>Automatically resets: {{ formatReset(workspace.rateLimits.primary.resetsAt) }}</small>
+          </div>
+          <div v-if="workspace.rateLimits?.secondary" class="usage-window">
+            <span>Long-term window</span>
+            <strong>{{ Math.round(workspace.rateLimits.secondary.remainingPercent) }}% left</strong>
+            <progress :value="workspace.rateLimits.secondary.remainingPercent" max="100"></progress>
+            <small>Automatically resets: {{ formatReset(workspace.rateLimits.secondary.resetsAt) }}</small>
+          </div>
+          <p>Limits are reset by the provider automatically. This client cannot manually reset provider quota.</p>
+          <button class="secondary-button" type="button" @click="workspace.loadRateLimits">Refresh usage</button>
+        </div>
         <button class="connection-chip" type="button" @click="showDiagnostics = !showDiagnostics">
           <span class="status-dot" :data-ready="connected"></span>
           {{ statusText }}
@@ -320,6 +362,8 @@ function backendOpen(path: string) {
                 v-if="segment.file"
                 class="file-link"
                 type="button"
+                :data-tooltip="linkedAddress(segment.file)"
+                :title="linkedAddress(segment.file)"
                 @click="openLinkedFile(segment.file)"
               >{{ segment.value }}</button><template v-else>{{ segment.value }}</template></template></pre>
             </article>
@@ -358,23 +402,37 @@ function backendOpen(path: string) {
               </button>
             </div>
             <div class="turn-controls">
-              <select
-                v-model="workspace.selectedModel"
-                @change="workspace.setModel(workspace.selectedModel)"
-              >
-                <option v-for="model in workspace.models" :key="model.id" :value="model.id">
-                  {{ model.displayName }}
-                </option>
-              </select>
-              <select v-model="workspace.selectedEffort">
-                <option v-for="effort in workspace.supportedEfforts" :key="effort" :value="effort">
+              <div class="model-control">
+                <button class="control-trigger" type="button" @click="showModelMenu = !showModelMenu">
+                  <span>Model</span><strong>{{ workspace.currentModel?.displayName || 'Default' }}</strong><b>⌄</b>
+                </button>
+                <div v-if="showModelMenu" class="model-menu">
+                  <button
+                    v-for="model in workspace.models"
+                    :key="model.id"
+                    type="button"
+                    :class="{ active: model.id === workspace.selectedModel }"
+                    @click="workspace.setModel(model.id); showModelMenu = false"
+                  >
+                    <strong>{{ model.displayName }}</strong><small>{{ model.description }}</small>
+                  </button>
+                </div>
+              </div>
+              <div class="segmented-control" aria-label="Reasoning effort">
+                <button
+                  v-for="effort in workspace.supportedEfforts"
+                  :key="effort"
+                  type="button"
+                  :class="{ active: effort === workspace.selectedEffort }"
+                  @click="workspace.selectedEffort = effort"
+                >
                   {{ effort }}
-                </option>
-              </select>
-              <select v-model="workspace.selectedMode">
-                <option value="default">Default mode</option>
-                <option value="plan">Plan mode</option>
-              </select>
+                </button>
+              </div>
+              <div class="segmented-control mode-control" aria-label="Workflow mode">
+                <button type="button" :class="{ active: workspace.selectedMode === 'default' }" @click="workspace.selectedMode = 'default'">Fast</button>
+                <button type="button" :class="{ active: workspace.selectedMode === 'plan' }" @click="workspace.selectedMode = 'plan'">Plan</button>
+              </div>
             </div>
             <div class="composer-footer">
               <span>
@@ -416,6 +474,45 @@ function backendOpen(path: string) {
         </div>
       </aside>
     </section>
+
+    <article
+      v-if="workspace.planArtifact?.status === 'needs_review'"
+      class="plan-review-overlay"
+    >
+      <section class="plan-review">
+        <header>
+          <div>
+            <p class="eyebrow">Plan artifact · Needs review</p>
+            <h2>Review before implementation</h2>
+            <span>Codex stayed read-only during this planning turn.</span>
+          </div>
+          <button type="button" @click="workspace.closePlanReview">×</button>
+        </header>
+        <div class="plan-review-body">
+          <aside>
+            <strong>Approval gate</strong>
+            <ol>
+              <li class="done">Repository analyzed</li>
+              <li class="done">Plan generated</li>
+              <li class="active">Human review</li>
+              <li>Implementation</li>
+              <li>Verification</li>
+            </ol>
+            <small>Approval switches the next turn to implementation mode. Revision keeps Codex in strict read-only planning mode.</small>
+          </aside>
+          <div class="plan-document">
+            <pre>{{ workspace.planArtifact.text }}</pre>
+          </div>
+        </div>
+        <footer>
+          <textarea v-model="planFeedback" rows="3" placeholder="Request a specific revision…"></textarea>
+          <div>
+            <button class="secondary-button" type="button" :disabled="!planFeedback.trim()" @click="requestPlanRevision">Revise plan</button>
+            <button class="primary-button" type="button" @click="workspace.approvePlan">Approve & implement</button>
+          </div>
+        </footer>
+      </section>
+    </article>
 
     <article v-if="workspace.currentApproval" class="approval-overlay">
       <div class="approval-card">
