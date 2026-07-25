@@ -4,7 +4,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { backend } from './backend'
 import { useDiagnosticsStore } from './stores/diagnostics'
 import { useWorkspaceStore } from './stores/workspace'
-import type { ConversationItem, FileMatch } from './types'
+import type { AgentProvider, ConversationItem, FileMatch } from './types'
 
 const diagnostics = useDiagnosticsStore()
 const workspace = useWorkspaceStore()
@@ -23,6 +23,7 @@ const memoryTitle = ref('')
 const memoryContent = ref('')
 const coordinationTaskId = ref('')
 const coordinationDraft = ref('')
+const setupProvider = ref<AgentProvider | null>(null)
 const planFeedback = ref('')
 const userAnswers = ref<Record<string, string[]>>({})
 const elicitationValues = ref<Record<string, unknown>>({})
@@ -188,6 +189,31 @@ async function openCoordination(taskId: string) {
 async function postCoordination() {
   await workspace.postCoordination(coordinationTaskId.value, coordinationDraft.value)
   coordinationDraft.value = ''
+}
+
+async function providerAction(provider: AgentProvider) {
+  if (!provider.installed) {
+    setupProvider.value = provider
+    return
+  }
+  await workspace.manageProviderLogin(provider.id)
+}
+
+function providerInstallCommand(providerId: string) {
+  switch (providerId) {
+    case 'claude':
+      return 'npm install -g @anthropic-ai/claude-code'
+    case 'gemini':
+      return 'npm install -g @google/gemini-cli'
+    case 'opencode':
+      return 'Visit https://opencode.ai/docs for the current Linux installer'
+    case 'ollama':
+      return 'Visit https://ollama.com/download/linux'
+    case 'antigravity':
+      return 'Install Antigravity using Google’s official distribution'
+    default:
+      return 'Install the provider CLI and refresh Mission Control'
+  }
 }
 
 const coordinationTask = computed(() =>
@@ -606,10 +632,16 @@ function backendOpen(path: string) {
               <button
                 class="provider-auth"
                 type="button"
-                :disabled="!provider.installed || provider.authStatus === 'not-required'"
-                @click="workspace.manageProviderLogin(provider.id)"
+                :disabled="provider.authStatus === 'not-required'"
+                @click.stop="providerAction(provider)"
               >
-                {{ provider.authStatus === 'authenticated' ? 'Manage' : 'Login' }}
+                {{
+                  !provider.installed
+                    ? 'Set up'
+                    : provider.authStatus === 'authenticated'
+                      ? 'Manage'
+                      : 'Login'
+                }}
               </button>
             </article>
           </div>
@@ -775,6 +807,29 @@ function backendOpen(path: string) {
         </aside>
       </div>
     </section>
+
+    <article v-if="setupProvider" class="approval-overlay">
+      <section class="approval-card provider-setup-card">
+        <p class="eyebrow">Provider setup</p>
+        <h2>Install {{ setupProvider.name }}</h2>
+        <p>
+          The provider CLI must be installed locally before Agent Workspace can open its official
+          authentication flow.
+        </p>
+        <pre>{{ providerInstallCommand(setupProvider.id) }}</pre>
+        <small>After installation, return to Mission Control and press Refresh. The button will change from Set up to Login.</small>
+        <div class="approval-actions">
+          <button class="secondary-button" type="button" @click="setupProvider = null">Close</button>
+          <button
+            class="primary-button"
+            type="button"
+            @click="setupProvider = null; workspace.loadAgentWorkspace()"
+          >
+            Refresh detection
+          </button>
+        </div>
+      </section>
+    </article>
 
     <article v-if="coordinationTaskId && coordinationTask" class="coordination-overlay">
       <section class="coordination-panel">
