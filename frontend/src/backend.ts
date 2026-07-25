@@ -3,6 +3,7 @@ import type {
   AgentProvider,
   AgentTaskBundle,
   AgentTaskRequest,
+  CoordinationMessage,
   ContextEntry,
   ElicitationRequest,
   FileMatch,
@@ -11,6 +12,7 @@ import type {
   Project,
   ProjectMemory,
   PreflightCheck,
+  ProviderAuthStart,
   RateLimits,
   StartupStatus,
   Thread,
@@ -34,6 +36,9 @@ export const backend = {
   getRateLimits: () => app().GetRateLimits() as Promise<RateLimits>,
   listModels: () => app().ListModels() as Promise<Model[]>,
   listAgentProviders: () => app().ListAgentProviders() as Promise<AgentProvider[]>,
+  beginProviderLogin: (providerId: string) =>
+    app().BeginProviderLogin(providerId) as Promise<ProviderAuthStart>,
+  logoutProvider: (providerId: string) => app().LogoutProvider(providerId),
   listAgentTasks: (projectId = '') =>
     app().ListAgentTasks(projectId) as Promise<AgentTaskBundle[]>,
   createAgentTask: (request: AgentTaskRequest) =>
@@ -46,6 +51,10 @@ export const backend = {
   createTaskWorktree: (taskId: string) => app().CreateTaskWorktree(taskId),
   runTaskVerification: (taskId: string) => app().RunTaskVerification(taskId),
   approveAgentTaskStage: (taskId: string) => app().ApproveAgentTaskStage(taskId),
+  listCoordinationMessages: (taskId: string) =>
+    app().ListCoordinationMessages(taskId) as Promise<CoordinationMessage[]>,
+  postCoordinationMessage: (taskId: string, message: string) =>
+    app().PostCoordinationMessage(taskId, '', 'human-guidance', message) as Promise<CoordinationMessage>,
   listProjectMemory: (projectId: string) =>
     app().ListProjectMemory(projectId) as Promise<ProjectMemory[]>,
   proposeProjectMemory: (projectId: string, kind: string, title: string, content: string) =>

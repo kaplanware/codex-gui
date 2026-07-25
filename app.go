@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io/fs"
 	"log/slog"
 	"net/url"
@@ -24,20 +26,23 @@ import (
 )
 
 type App struct {
-	ctx           context.Context
-	manager       *codex.Manager
-	store         *database.Store
-	projects      *projects.Service
-	databaseErr   error
-	logger        *slog.Logger
-	agentRegistry *agents.Registry
-	runMu         sync.Mutex
-	turnRuns      map[string]runReference
+	ctx            context.Context
+	manager        *codex.Manager
+	store          *database.Store
+	projects       *projects.Service
+	databaseErr    error
+	logger         *slog.Logger
+	agentRegistry  *agents.Registry
+	runMu          sync.Mutex
+	turnRuns       map[string]runReference
+	coordinationMu sync.Mutex
+	watchers       map[string]context.CancelFunc
 }
 
 type runReference struct {
-	TaskID string
-	RunID  string
+	TaskID   string
+	RunID    string
+	ThreadID string
 }
 
 func NewApp() *App {
@@ -46,6 +51,7 @@ func NewApp() *App {
 	app := &App{
 		manager: codex.NewManager(logger), store: store, databaseErr: err, logger: logger,
 		agentRegistry: agents.NewRegistry(), turnRuns: make(map[string]runReference),
+		watchers: make(map[string]context.CancelFunc),
 	}
 	if store != nil {
 		app.projects = projects.NewService(store)
@@ -61,6 +67,7 @@ func (a *App) startup(ctx context.Context) {
 	})
 	go func() {
 		a.agentRegistry.Detect(context.Background())
+		a.resumeCoordinationWatchers()
 		if err := a.manager.Start(context.Background()); err != nil {
 			slog.Debug("automatic Codex connection failed", "error", err)
 		}
@@ -82,7 +89,29 @@ type AgentTaskBundle struct {
 	Artifacts []database.Artifact `json:"artifacts"`
 }
 
+type ProviderAuthStart struct {
+	ProviderID string `json:"providerId"`
+	Mode       string `json:"mode"`
+	Message    string `json:"message"`
+}
+
+type CoordinationMessage struct {
+	ID        string `json:"id"`
+	TaskID    string `json:"taskId"`
+	RunID     string `json:"runId,omitempty"`
+	Role      string `json:"role,omitempty"`
+	Kind      string `json:"kind"`
+	Message   string `json:"message"`
+	CreatedAt string `json:"createdAt"`
+}
+
 func (a *App) shutdown(_ context.Context) {
+	a.coordinationMu.Lock()
+	for _, cancel := range a.watchers {
+		cancel()
+	}
+	a.watchers = make(map[string]context.CancelFunc)
+	a.coordinationMu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), codex.ShutdownTimeout)
 	defer cancel()
 	_ = a.manager.Stop(ctx)
@@ -288,7 +317,151 @@ func (a *App) ListModels() ([]ModelView, error) {
 }
 
 func (a *App) ListAgentProviders() []agents.ProviderStatus {
-	return a.agentRegistry.Detect(context.Background())
+	statuses := a.agentRegistry.Detect(context.Background())
+	for index := range statuses {
+		statuses[index].AuthStatus = a.providerAuthStatus(statuses[index])
+	}
+	return statuses
+}
+
+func (a *App) BeginProviderLogin(providerID string) (ProviderAuthStart, error) {
+	if providerID == "codex" {
+		if _, err := a.LoginWithChatGPT(); err != nil {
+			return ProviderAuthStart{}, err
+		}
+		return ProviderAuthStart{
+			ProviderID: providerID, Mode: "browser",
+			Message: "Complete Codex authentication in the browser.",
+		}, nil
+	}
+	provider, err := a.installedProvider(providerID)
+	if err != nil {
+		return ProviderAuthStart{}, err
+	}
+	args := providerLoginArgs(providerID)
+	if args == nil {
+		return ProviderAuthStart{}, errors.New("this provider does not expose a supported interactive login flow")
+	}
+	if err := launchInTerminal(provider.Executable, args...); err != nil {
+		return ProviderAuthStart{}, err
+	}
+	return ProviderAuthStart{
+		ProviderID: providerID, Mode: "terminal",
+		Message: "An interactive provider authentication terminal was opened.",
+	}, nil
+}
+
+func (a *App) LogoutProvider(providerID string) error {
+	if providerID == "codex" {
+		return a.Logout()
+	}
+	provider, err := a.installedProvider(providerID)
+	if err != nil {
+		return err
+	}
+	var args []string
+	switch providerID {
+	case "opencode":
+		args = []string{"auth", "logout"}
+	default:
+		return errors.New("use Manage login to change authentication for this provider")
+	}
+	return launchInTerminal(provider.Executable, args...)
+}
+
+func (a *App) providerAuthStatus(provider agents.ProviderStatus) string {
+	if !provider.Installed {
+		return "not-installed"
+	}
+	if provider.ID == "ollama" {
+		return "not-required"
+	}
+	if provider.ID == "codex" {
+		account, err := a.GetAccount()
+		if err == nil && account.SignedIn {
+			return "authenticated"
+		}
+		if err == nil {
+			return "signed-out"
+		}
+		return "unknown"
+	}
+	var args []string
+	switch provider.ID {
+	case "claude":
+		args = []string{"auth", "status"}
+	case "opencode":
+		args = []string{"auth", "list"}
+	default:
+		return "unknown"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, provider.Executable, args...)
+	output, err := command.CombinedOutput()
+	if err == nil && strings.TrimSpace(string(output)) != "" {
+		return "authenticated"
+	}
+	return "signed-out"
+}
+
+func (a *App) installedProvider(providerID string) (agents.ProviderStatus, error) {
+	for _, provider := range a.agentRegistry.Detect(context.Background()) {
+		if provider.ID == providerID {
+			if !provider.Installed {
+				return agents.ProviderStatus{}, fmt.Errorf("%s is not installed", provider.Name)
+			}
+			return provider, nil
+		}
+	}
+	return agents.ProviderStatus{}, errors.New("unknown provider")
+}
+
+func providerLoginArgs(providerID string) []string {
+	switch providerID {
+	case "claude", "gemini", "antigravity":
+		return []string{}
+	case "opencode":
+		return []string{"auth", "login"}
+	default:
+		return nil
+	}
+}
+
+func launchInTerminal(executable string, args ...string) error {
+	type terminal struct {
+		name string
+		args func(string, []string) []string
+	}
+	candidates := []terminal{
+		{name: "kitty", args: func(command string, commandArgs []string) []string {
+			return append([]string{"--hold", command}, commandArgs...)
+		}},
+		{name: "konsole", args: func(command string, commandArgs []string) []string {
+			return append([]string{"-e", command}, commandArgs...)
+		}},
+		{name: "gnome-terminal", args: func(command string, commandArgs []string) []string {
+			return append([]string{"--", command}, commandArgs...)
+		}},
+		{name: "foot", args: func(command string, commandArgs []string) []string {
+			return append([]string{"--hold", command}, commandArgs...)
+		}},
+		{name: "xterm", args: func(command string, commandArgs []string) []string {
+			return append([]string{"-hold", "-e", command}, commandArgs...)
+		}},
+	}
+	for _, candidate := range candidates {
+		path, err := exec.LookPath(candidate.name)
+		if err != nil {
+			continue
+		}
+		command := exec.Command(path, candidate.args(executable, args)...)
+		if err := command.Start(); err != nil {
+			continue
+		}
+		return command.Process.Release()
+	}
+	return errors.New("no supported terminal emulator was found")
 }
 
 func (a *App) ListAgentTasks(projectID string) ([]AgentTaskBundle, error) {
@@ -323,7 +496,8 @@ func (a *App) CreateAgentTask(request AgentTaskRequest) (AgentTaskBundle, error)
 	if request.ProjectID == "" || request.Prompt == "" {
 		return AgentTaskBundle{}, errors.New("project and task prompt are required")
 	}
-	if _, err := a.projects.Get(context.Background(), request.ProjectID); err != nil {
+	project, err := a.projects.Get(context.Background(), request.ProjectID)
+	if err != nil {
 		return AgentTaskBundle{}, err
 	}
 	if request.Title == "" {
@@ -373,6 +547,9 @@ func (a *App) CreateAgentTask(request AgentTaskRequest) (AgentTaskBundle, error)
 		}
 		runs = append(runs, run)
 	}
+	if err := a.initializeTaskCoordination(task, runs, project); err != nil {
+		return AgentTaskBundle{}, err
+	}
 	preflight, _ := json.MarshalIndent(a.PreflightProject(request.ProjectID), "", "  ")
 	artifact := database.Artifact{
 		ID: newLocalID("artifact"), TaskID: task.ID, Type: "preflight",
@@ -386,6 +563,243 @@ func (a *App) CreateAgentTask(request AgentTaskRequest) (AgentTaskBundle, error)
 	}
 	go a.startEligibleRuns(task.ID)
 	return AgentTaskBundle{Task: task, Runs: runs, Artifacts: artifacts}, nil
+}
+
+func (a *App) ListCoordinationMessages(taskID string) ([]CoordinationMessage, error) {
+	task, err := a.store.GetTask(context.Background(), taskID)
+	if err != nil {
+		return nil, err
+	}
+	project, err := a.projects.Get(context.Background(), task.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	mailbox := filepath.Join(taskCoordinationDir(project.CanonicalPath, taskID), "MAILBOX.jsonl")
+	file, err := os.Open(mailbox)
+	if errors.Is(err, os.ErrNotExist) {
+		return []CoordinationMessage{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	messages := make([]CoordinationMessage, 0)
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 4096), 1024*1024)
+	for scanner.Scan() {
+		var message CoordinationMessage
+		line := append([]byte(nil), scanner.Bytes()...)
+		if json.Unmarshal(line, &message) == nil && message.Message != "" {
+			if message.ID == "" {
+				hasher := fnv.New64a()
+				_, _ = hasher.Write(line)
+				message.ID = fmt.Sprintf("mailbox-%x", hasher.Sum64())
+			}
+			if message.TaskID == "" {
+				message.TaskID = taskID
+			}
+			messages = append(messages, message)
+		}
+	}
+	return messages, scanner.Err()
+}
+
+func (a *App) PostCoordinationMessage(taskID, runID, kind, message string) (CoordinationMessage, error) {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return CoordinationMessage{}, errors.New("coordination message cannot be empty")
+	}
+	task, err := a.store.GetTask(context.Background(), taskID)
+	if err != nil {
+		return CoordinationMessage{}, err
+	}
+	project, err := a.projects.Get(context.Background(), task.ProjectID)
+	if err != nil {
+		return CoordinationMessage{}, err
+	}
+	role := "human"
+	if runID != "" {
+		runs, runErr := a.store.ListRuns(context.Background(), taskID)
+		if runErr != nil {
+			return CoordinationMessage{}, runErr
+		}
+		found := false
+		for _, run := range runs {
+			if run.ID == runID {
+				role, found = run.Role, true
+				break
+			}
+		}
+		if !found {
+			return CoordinationMessage{}, errors.New("run does not belong to task")
+		}
+	}
+	entry := CoordinationMessage{
+		ID: newLocalID("message"), TaskID: taskID, RunID: runID, Role: role,
+		Kind: kind, Message: message, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	data, _ := json.Marshal(entry)
+	mailbox := filepath.Join(taskCoordinationDir(project.CanonicalPath, taskID), "MAILBOX.jsonl")
+	a.coordinationMu.Lock()
+	defer a.coordinationMu.Unlock()
+	file, err := os.OpenFile(mailbox, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return CoordinationMessage{}, err
+	}
+	_, writeErr := file.Write(append(data, '\n'))
+	closeErr := file.Close()
+	if writeErr != nil {
+		return CoordinationMessage{}, writeErr
+	}
+	return entry, closeErr
+}
+
+func (a *App) initializeTaskCoordination(
+	task database.Task,
+	runs []database.AgentRun,
+	project database.Project,
+) error {
+	dir := taskCoordinationDir(project.CanonicalPath, task.ID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	var roles strings.Builder
+	for _, run := range runs {
+		fmt.Fprintf(&roles, "- `%s`: role=%s provider=%s status=%s\n", run.ID, run.Role, run.ProviderID, run.Status)
+	}
+	document := fmt.Sprintf(`# Shared Agent Task
+
+Task ID: %s
+Project: %s
+Workflow: %s
+Status: %s
+
+## Objective
+
+%s
+
+## Runs
+
+%s
+## Coordination protocol
+
+1. Read this file and MAILBOX.jsonl before making decisions.
+2. Append one JSON object per line to MAILBOX.jsonl for findings, questions, handoffs, conflicts, and completion.
+3. Never overwrite or truncate MAILBOX.jsonl.
+4. Include a unique id, taskId, runId, role, kind, message, and an ISO-8601 createdAt timestamp.
+5. Re-read the mailbox before finalizing work. Resolve conflicts explicitly.
+6. Put durable outputs in ARTIFACTS.md and reference changed files rather than copying large content.
+`, task.ID, project.CanonicalPath, task.Mode, task.Status, task.Prompt, roles.String())
+	if err := os.WriteFile(filepath.Join(dir, "TASK.md"), []byte(document), 0o600); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ARTIFACTS.md"), []byte("# Shared Artifacts\n\n"), 0o600); err != nil {
+		return err
+	}
+	mailbox := filepath.Join(dir, "MAILBOX.jsonl")
+	if _, err := os.Stat(mailbox); errors.Is(err, os.ErrNotExist) {
+		if err := os.WriteFile(mailbox, nil, 0o600); err != nil {
+			return err
+		}
+	}
+	a.startCoordinationWatcher(task.ID)
+	return nil
+}
+
+func taskCoordinationDir(projectRoot, taskID string) string {
+	return filepath.Join(projectRoot, ".agent-workspace", "tasks", taskID)
+}
+
+func (a *App) resumeCoordinationWatchers() {
+	if a.store == nil {
+		return
+	}
+	tasks, err := a.store.ListTasks(context.Background(), "")
+	if err != nil {
+		return
+	}
+	for _, task := range tasks {
+		if task.Status != "completed" && task.Status != "cancelled" {
+			a.startCoordinationWatcher(task.ID)
+		}
+	}
+}
+
+func (a *App) startCoordinationWatcher(taskID string) {
+	a.coordinationMu.Lock()
+	if _, exists := a.watchers[taskID]; exists {
+		a.coordinationMu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.watchers[taskID] = cancel
+	a.coordinationMu.Unlock()
+	go func() {
+		seen := make(map[string]bool)
+		if messages, err := a.ListCoordinationMessages(taskID); err == nil {
+			for _, message := range messages {
+				seen[message.ID] = true
+			}
+		}
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				messages, err := a.ListCoordinationMessages(taskID)
+				if err != nil {
+					continue
+				}
+				for _, message := range messages {
+					if seen[message.ID] {
+						continue
+					}
+					seen[message.ID] = true
+					if a.ctx != nil {
+						runtime.EventsEmit(a.ctx, "agents:coordination-message", message)
+					}
+					a.steerTaskRuns(message)
+				}
+			}
+		}
+	}()
+}
+
+func (a *App) stopCoordinationWatcher(taskID string) {
+	a.coordinationMu.Lock()
+	cancel := a.watchers[taskID]
+	delete(a.watchers, taskID)
+	a.coordinationMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (a *App) steerTaskRuns(message CoordinationMessage) {
+	a.runMu.Lock()
+	references := make(map[string]runReference, len(a.turnRuns))
+	for turnID, reference := range a.turnRuns {
+		references[turnID] = reference
+	}
+	a.runMu.Unlock()
+	for turnID, reference := range references {
+		if reference.TaskID != message.TaskID || reference.RunID == message.RunID || reference.ThreadID == "" {
+			continue
+		}
+		params := map[string]any{
+			"threadId": reference.ThreadID, "expectedTurnId": turnID,
+			"input": []map[string]any{{
+				"type":          "text",
+				"text":          fmt.Sprintf("[Shared task mailbox · %s/%s]\n%s", message.Role, message.Kind, message.Message),
+				"text_elements": []any{},
+			}},
+		}
+		go func() {
+			_ = a.call("turn/steer", params, nil)
+		}()
+	}
 }
 
 func (a *App) PreflightProject(projectID string) []agents.PreflightCheck {
@@ -675,7 +1089,7 @@ func (a *App) StartThread(projectID string) (ThreadView, error) {
 	return a.startThreadAt(projectID, project.CanonicalPath)
 }
 
-func (a *App) startThreadAt(projectID, cwd string) (ThreadView, error) {
+func (a *App) startThreadAt(projectID, cwd string, writableRoots ...string) (ThreadView, error) {
 	var response struct {
 		Thread struct {
 			ID        string `json:"id"`
@@ -683,9 +1097,15 @@ func (a *App) startThreadAt(projectID, cwd string) (ThreadView, error) {
 			UpdatedAt int64  `json:"updatedAt"`
 		} `json:"thread"`
 	}
-	err := a.call("thread/start", map[string]any{
+	params := map[string]any{
 		"cwd": cwd, "approvalPolicy": "on-request", "sandbox": "workspace-write",
-	}, &response)
+	}
+	if len(writableRoots) > 0 {
+		params["config"] = map[string]any{
+			"sandbox_workspace_write": map[string]any{"writable_roots": writableRoots},
+		}
+	}
+	err := a.call("thread/start", params, &response)
 	if err != nil {
 		return ThreadView{}, err
 	}
@@ -1098,12 +1518,14 @@ func (a *App) startEligibleRuns(taskID string) {
 			continue
 		}
 		started = true
-		if run.ProviderID != "codex" {
-			_ = a.store.UpdateRun(context.Background(), run.ID, "unavailable", 0, "Provider execution adapter is not available yet.", "")
-			continue
+		var startErr error
+		if run.ProviderID == "codex" {
+			startErr = a.startCodexAgentRun(task, run)
+		} else {
+			startErr = a.startExternalAgentRun(task, run)
 		}
-		if err := a.startCodexAgentRun(task, run); err != nil {
-			_ = a.store.UpdateRun(context.Background(), run.ID, "failed", 0, err.Error(), "")
+		if startErr != nil {
+			_ = a.store.UpdateRun(context.Background(), run.ID, "failed", 0, startErr.Error(), "")
 		}
 		if task.Mode == "delivery" {
 			break
@@ -1130,11 +1552,17 @@ func (a *App) startCodexAgentRun(task database.Task, run database.AgentRun) erro
 			return err
 		}
 	}
-	thread, err := a.startThreadAt(task.ProjectID, cwd)
+	coordinationDir := taskCoordinationDir(project.CanonicalPath, task.ID)
+	thread, err := a.startThreadAt(task.ProjectID, cwd, coordinationDir)
 	if err != nil {
 		return err
 	}
-	prompt := rolePrompt(run.Role, task.Prompt)
+	prompt := rolePrompt(run.Role, task.Prompt) + fmt.Sprintf(
+		"\n\nShared coordination:\n- Read %s before starting.\n- Exchange concise findings and handoffs by appending valid JSON lines to %s.\n- Re-read the mailbox before finalizing. Never overwrite it.\n- Your runId is %s.",
+		filepath.Join(coordinationDir, "TASK.md"),
+		filepath.Join(coordinationDir, "MAILBOX.jsonl"),
+		run.ID,
+	)
 	mode := "default"
 	if run.Role == "planner" {
 		mode = "plan"
@@ -1144,13 +1572,100 @@ func (a *App) startCodexAgentRun(task database.Task, run database.AgentRun) erro
 		return err
 	}
 	a.runMu.Lock()
-	a.turnRuns[turn.TurnID] = runReference{TaskID: task.ID, RunID: run.ID}
+	a.turnRuns[turn.TurnID] = runReference{TaskID: task.ID, RunID: run.ID, ThreadID: thread.ID}
 	a.runMu.Unlock()
 	if err := a.store.UpdateRun(context.Background(), run.ID, "running", 10, "Codex session started", thread.ID); err != nil {
 		return err
 	}
 	a.emitAgentTasksChanged()
 	return nil
+}
+
+func (a *App) startExternalAgentRun(task database.Task, run database.AgentRun) error {
+	project, err := a.projects.Get(context.Background(), task.ProjectID)
+	if err != nil {
+		return err
+	}
+	provider, err := a.installedProvider(run.ProviderID)
+	if err != nil {
+		return err
+	}
+	if !provider.Runnable {
+		return errors.New("provider execution adapter is not available")
+	}
+	cwd := project.CanonicalPath
+	if project.IsGitRepository && (task.Mode == "parallel" || run.Role == "implementer") {
+		cwd, err = a.createRunWorktree(project, run)
+		if err != nil {
+			return err
+		}
+		if err := a.store.SetRunWorktree(context.Background(), run.ID, cwd); err != nil {
+			return err
+		}
+	}
+	coordinationDir := taskCoordinationDir(project.CanonicalPath, task.ID)
+	prompt := rolePrompt(run.Role, task.Prompt) + fmt.Sprintf(
+		"\n\nShared coordination:\nRead %s and append findings/handoffs as JSONL to %s. Your runId is %s. Re-read the mailbox before finalizing.",
+		filepath.Join(coordinationDir, "TASK.md"), filepath.Join(coordinationDir, "MAILBOX.jsonl"), run.ID,
+	)
+	args, err := externalAgentArgs(run.ProviderID, run.Role, prompt, coordinationDir)
+	if err != nil {
+		return err
+	}
+	if err := a.store.UpdateRun(context.Background(), run.ID, "running", 10, provider.Name+" process started", ""); err != nil {
+		return err
+	}
+	a.emitAgentTasksChanged()
+	go func() {
+		output, commandErr := commandOutput(context.Background(), cwd, 30*time.Minute, provider.Executable, args...)
+		status, summary := "completed", provider.Name+" run completed"
+		artifactStatus := "generated"
+		if commandErr != nil {
+			status, summary, artifactStatus = "failed", commandErr.Error(), "failed"
+		}
+		timestamp := time.Now().UTC().Format(time.RFC3339Nano)
+		_ = a.store.CreateArtifact(context.Background(), database.Artifact{
+			ID: newLocalID("agent-output"), TaskID: task.ID, RunID: run.ID,
+			Type: "agent-output", Title: provider.Name + " · " + run.Role,
+			Status: artifactStatus, Content: truncate(output, 100000),
+			CreatedAt: timestamp, UpdatedAt: timestamp,
+		})
+		_, _ = a.PostCoordinationMessage(task.ID, run.ID, status, summary)
+		a.finalizeAgentRun(runReference{TaskID: task.ID, RunID: run.ID}, status, summary)
+	}()
+	return nil
+}
+
+func externalAgentArgs(providerID, role, prompt, coordinationDir string) ([]string, error) {
+	readOnly := role == "planner" || role == "reviewer" || role == "security"
+	switch providerID {
+	case "claude":
+		mode := "acceptEdits"
+		if readOnly {
+			mode = "plan"
+		}
+		return []string{
+			"-p", prompt, "--output-format", "json", "--permission-mode", mode,
+			"--add-dir", coordinationDir, "--max-turns", "100",
+		}, nil
+	case "gemini":
+		mode := "auto_edit"
+		if readOnly {
+			mode = "plan"
+		}
+		return []string{
+			"-p", prompt, "--output-format", "json", "--approval-mode", mode,
+			"--include-directories", coordinationDir,
+		}, nil
+	case "opencode":
+		args := []string{"run", prompt, "--format", "json"}
+		if !readOnly {
+			args = append(args, "--auto")
+		}
+		return args, nil
+	default:
+		return nil, errors.New("provider has no headless execution adapter")
+	}
 }
 
 func (a *App) createRunWorktree(project database.Project, run database.AgentRun) (string, error) {
@@ -1181,7 +1696,15 @@ func (a *App) completeAgentRun(turnID string) {
 	if !ok {
 		return
 	}
-	_ = a.store.UpdateRun(context.Background(), reference.RunID, "completed", 100, "Run completed", "")
+	a.finalizeAgentRun(reference, "completed", "Run completed")
+}
+
+func (a *App) finalizeAgentRun(reference runReference, status, summary string) {
+	progress := 100
+	if status == "failed" {
+		progress = 0
+	}
+	_ = a.store.UpdateRun(context.Background(), reference.RunID, status, progress, summary, "")
 	task, err := a.store.GetTask(context.Background(), reference.TaskID)
 	if err != nil {
 		return
@@ -1191,6 +1714,11 @@ func (a *App) completeAgentRun(turnID string) {
 		return
 	}
 	if task.Mode == "delivery" {
+		if status == "failed" {
+			_ = a.store.UpdateTaskStatus(context.Background(), reference.TaskID, "failed")
+			a.emitAgentTasksChanged()
+			return
+		}
 		for _, run := range runs {
 			if run.ID == reference.RunID && run.Role == "planner" {
 				_ = a.store.UpdateTaskStatus(context.Background(), reference.TaskID, "waiting-approval")
@@ -1221,7 +1749,15 @@ func (a *App) completeAgentRun(turnID string) {
 		}
 	}
 	if allTerminal {
-		_ = a.store.UpdateTaskStatus(context.Background(), reference.TaskID, "completed")
+		taskStatus := "completed"
+		for _, run := range runs {
+			if run.Status == "failed" || run.Status == "unavailable" {
+				taskStatus = "completed-with-findings"
+				break
+			}
+		}
+		_ = a.store.UpdateTaskStatus(context.Background(), reference.TaskID, taskStatus)
+		a.stopCoordinationWatcher(reference.TaskID)
 		timestamp := time.Now().UTC().Format(time.RFC3339Nano)
 		_ = a.store.CreateArtifact(context.Background(), database.Artifact{
 			ID: newLocalID("artifact"), TaskID: reference.TaskID, Type: "verification",

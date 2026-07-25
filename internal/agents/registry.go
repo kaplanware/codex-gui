@@ -31,6 +31,7 @@ type ProviderStatus struct {
 	Executable   string       `json:"executable,omitempty"`
 	Version      string       `json:"version,omitempty"`
 	Status       string       `json:"status"`
+	AuthStatus   string       `json:"authStatus"`
 	Capabilities []Capability `json:"capabilities"`
 }
 
@@ -65,7 +66,7 @@ func (r *Registry) Detect(ctx context.Context) []ProviderStatus {
 	for _, definition := range r.definitions {
 		status := ProviderStatus{
 			ID: definition.ID, Name: definition.Name, Kind: definition.Kind,
-			Status: "not-installed", Capabilities: definition.Capabilities,
+			Status: "not-installed", AuthStatus: "not-installed", Capabilities: definition.Capabilities,
 		}
 		for _, executable := range definition.Executables {
 			path, err := exec.LookPath(executable)
@@ -74,12 +75,14 @@ func (r *Registry) Detect(ctx context.Context) []ProviderStatus {
 			}
 			status.Installed = true
 			status.Executable = path
-			status.Runnable = definition.ID == "codex"
+			status.Runnable = definition.ID == "codex" || definition.ID == "claude" ||
+				definition.ID == "gemini" || definition.ID == "opencode"
 			if status.Runnable {
 				status.Status = "available"
 			} else {
 				status.Status = "adapter-pending"
 			}
+			status.AuthStatus = "unknown"
 			commandCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 			output, err := exec.CommandContext(commandCtx, path, definition.VersionArgs...).CombinedOutput()
 			cancel()

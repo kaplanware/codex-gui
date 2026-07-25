@@ -13,6 +13,8 @@ declare global {
           GetRateLimits(): Promise<unknown>
           ListModels(): Promise<unknown>
           ListAgentProviders(): Promise<unknown>
+          BeginProviderLogin(providerId: string): Promise<unknown>
+          LogoutProvider(providerId: string): Promise<void>
           ListAgentTasks(projectId: string): Promise<unknown>
           CreateAgentTask(request: unknown): Promise<unknown>
           PreflightProject(projectId: string): Promise<unknown>
@@ -25,6 +27,8 @@ declare global {
           CreateTaskWorktree(taskId: string): Promise<unknown>
           RunTaskVerification(taskId: string): Promise<unknown>
           ApproveAgentTaskStage(taskId: string): Promise<void>
+          ListCoordinationMessages(taskId: string): Promise<unknown>
+          PostCoordinationMessage(taskId: string, runId: string, kind: string, message: string): Promise<unknown>
           LoginWithChatGPT(): Promise<unknown>
           LoginWithDeviceCode(): Promise<unknown>
           Logout(): Promise<void>

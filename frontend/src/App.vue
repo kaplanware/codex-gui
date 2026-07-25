@@ -21,6 +21,8 @@ const selectedRoles = ref(['planner', 'implementer', 'reviewer'])
 const roleProviders = ref<Record<string, string>>({})
 const memoryTitle = ref('')
 const memoryContent = ref('')
+const coordinationTaskId = ref('')
+const coordinationDraft = ref('')
 const planFeedback = ref('')
 const userAnswers = ref<Record<string, string[]>>({})
 const elicitationValues = ref<Record<string, unknown>>({})
@@ -177,6 +179,20 @@ async function proposeMemory() {
   memoryTitle.value = ''
   memoryContent.value = ''
 }
+
+async function openCoordination(taskId: string) {
+  coordinationTaskId.value = taskId
+  await workspace.loadCoordination(taskId)
+}
+
+async function postCoordination() {
+  await workspace.postCoordination(coordinationTaskId.value, coordinationDraft.value)
+  coordinationDraft.value = ''
+}
+
+const coordinationTask = computed(() =>
+  workspace.agentTasks.find((bundle) => bundle.task.id === coordinationTaskId.value),
+)
 
 const activeRuns = computed(() =>
   workspace.agentTasks.flatMap((bundle) => bundle.runs).filter((run) => run.status === 'running'),
@@ -584,8 +600,17 @@ function backendOpen(path: string) {
                       ? provider.version || 'Available'
                       : 'Detected · adapter pending'
                 }}</small>
+                <small class="auth-state">{{ provider.authStatus }}</small>
               </div>
               <i :data-ready="provider.runnable"></i>
+              <button
+                class="provider-auth"
+                type="button"
+                :disabled="!provider.installed || provider.authStatus === 'not-required'"
+                @click="workspace.manageProviderLogin(provider.id)"
+              >
+                {{ provider.authStatus === 'authenticated' ? 'Manage' : 'Login' }}
+              </button>
             </article>
           </div>
 
@@ -677,6 +702,7 @@ function backendOpen(path: string) {
                 <button type="button" @click="workspace.createTaskSnapshot(bundle.task.id)">Snapshot</button>
                 <button type="button" @click="workspace.createTaskWorktree(bundle.task.id)">Isolated worktree</button>
                 <button type="button" @click="workspace.verifyTask(bundle.task.id)">Run verification</button>
+                <button type="button" @click="openCoordination(bundle.task.id)">Shared task</button>
               </footer>
             </article>
           </div>
@@ -749,6 +775,43 @@ function backendOpen(path: string) {
         </aside>
       </div>
     </section>
+
+    <article v-if="coordinationTaskId && coordinationTask" class="coordination-overlay">
+      <section class="coordination-panel">
+        <header>
+          <div>
+            <p class="eyebrow">Shared task bus</p>
+            <h2>{{ coordinationTask.task.title }}</h2>
+            <span>TASK.md · append-only MAILBOX.jsonl · live turn steering</span>
+          </div>
+          <button type="button" @click="coordinationTaskId = ''">×</button>
+        </header>
+        <div class="coordination-runs">
+          <span v-for="run in coordinationTask.runs" :key="run.id" :data-status="run.status">
+            {{ run.role }} · {{ run.providerId }} · {{ run.status }}
+          </span>
+        </div>
+        <div class="coordination-feed">
+          <article
+            v-for="message in workspace.coordinationByTask[coordinationTaskId] ?? []"
+            :key="message.id"
+            :data-role="message.role"
+          >
+            <header><strong>{{ message.role || 'agent' }}</strong><span>{{ message.kind }}</span><time>{{ new Date(message.createdAt).toLocaleTimeString() }}</time></header>
+            <p>{{ message.message }}</p>
+          </article>
+          <div v-if="!(workspace.coordinationByTask[coordinationTaskId] ?? []).length" class="mission-empty">
+            No messages yet. Agents append findings, questions, and handoffs here.
+          </div>
+        </div>
+        <footer>
+          <textarea v-model="coordinationDraft" rows="3" placeholder="Broadcast guidance to every active agent on this task…" />
+          <button class="primary-button" type="button" :disabled="!coordinationDraft.trim()" @click="postCoordination">
+            Broadcast
+          </button>
+        </footer>
+      </section>
+    </article>
 
     <article
       v-if="workspace.planArtifact?.status === 'needs_review'"

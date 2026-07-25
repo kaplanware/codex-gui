@@ -32,6 +32,9 @@ The local workspace and orchestration foundation is implemented:
 - Agent Mission Control with persistent tasks, runs, and artifacts
 - Sequential planner → approval → implementer → reviewer delivery workflows
 - Parallel jury runs isolated in per-agent Git worktrees
+- Codex browser login plus interactive Claude Code, Gemini CLI, and OpenCode authentication
+- Headless Claude Code, Gemini CLI, and OpenCode execution adapters
+- Shared `TASK.md` / append-only `MAILBOX.jsonl` coordination with live handoffs
 - Smart role routing across installed providers
 - Preflight checks, production guard, command risk assessment, and snapshots
 - Context Inspector with token estimates

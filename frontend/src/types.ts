@@ -215,6 +215,7 @@ export interface AgentProvider {
   executable?: string
   version?: string
   status: string
+  authStatus: string
   capabilities: string[]
 }
 
@@ -295,5 +296,21 @@ export interface ProjectMemory {
   title: string
   content: string
   status: string
+  createdAt: string
+}
+
+export interface ProviderAuthStart {
+  providerId: string
+  mode: string
+  message: string
+}
+
+export interface CoordinationMessage {
+  id: string
+  taskId: string
+  runId?: string
+  role?: string
+  kind: string
+  message: string
   createdAt: string
 }

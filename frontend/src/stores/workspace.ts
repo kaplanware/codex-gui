@@ -9,6 +9,7 @@ import type {
   Approval,
   ConversationItem,
   ContextEntry,
+  CoordinationMessage,
   ElicitationRequest,
   FileMatch,
   MentionInput,
@@ -54,6 +55,7 @@ export const useWorkspaceStore = defineStore('workspace', {
     preflight: [] as PreflightCheck[],
     contextEntries: [] as ContextEntry[],
     projectMemory: [] as ProjectMemory[],
+    coordinationByTask: {} as Record<string, CoordinationMessage[]>,
     selectedModel: '',
     selectedEffort: '',
     selectedMode: 'default' as 'default' | 'plan',
@@ -168,6 +170,13 @@ export const useWorkspaceStore = defineStore('workspace', {
           this.elicitations.push(payload as ElicitationRequest)
         }),
         subscribe('agents:tasks-updated', () => void this.loadAgentTasks()),
+        subscribe('agents:coordination-message', (payload) => {
+          const message = payload as CoordinationMessage
+          const messages = this.coordinationByTask[message.taskId] ?? []
+          if (!messages.some((candidate) => candidate.id === message.id)) {
+            this.coordinationByTask[message.taskId] = [...messages, message]
+          }
+        }),
       )
     },
     disconnectEvents() {
@@ -220,6 +229,18 @@ export const useWorkspaceStore = defineStore('workspace', {
         this.error = message(error)
       }
     },
+    async manageProviderLogin(providerId: string) {
+      await this.run(async () => {
+        await backend.beginProviderLogin(providerId)
+        globalThis.setTimeout(() => void this.loadAgentWorkspace(), 2500)
+      })
+    },
+    async logoutProvider(providerId: string) {
+      await this.run(async () => {
+        await backend.logoutProvider(providerId)
+        await this.loadAgentWorkspace()
+      })
+    },
     async loadAgentTasks() {
       try {
         this.agentTasks = await backend.listAgentTasks(this.activeProject?.id ?? '')
@@ -256,6 +277,21 @@ export const useWorkspaceStore = defineStore('workspace', {
       await this.run(async () => {
         await backend.approveAgentTaskStage(taskId)
         await this.loadAgentTasks()
+      })
+    },
+    async loadCoordination(taskId: string) {
+      try {
+        this.coordinationByTask[taskId] = await backend.listCoordinationMessages(taskId)
+      } catch (error) {
+        this.error = message(error)
+      }
+    },
+    async postCoordination(taskId: string, text: string) {
+      if (!text.trim()) return
+      await this.run(async () => {
+        const posted = await backend.postCoordinationMessage(taskId, text)
+        const messages = this.coordinationByTask[taskId] ?? []
+        this.coordinationByTask[taskId] = [...messages, posted]
       })
     },
     async proposeMemory(kind: string, title: string, content: string) {
