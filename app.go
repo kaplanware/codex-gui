@@ -1063,25 +1063,57 @@ func (a *App) RunTaskVerification(taskID string) (database.Artifact, error) {
 	if err != nil {
 		return database.Artifact{}, err
 	}
+	verifyRoot := project.CanonicalPath
+	if runs, runErr := a.store.ListRuns(context.Background(), taskID); runErr == nil {
+		for _, run := range runs {
+			if run.Role == "implementer" && run.Worktree != "" {
+				if info, statErr := os.Stat(run.Worktree); statErr == nil && info.IsDir() {
+					verifyRoot = run.Worktree
+					break
+				}
+			}
+		}
+	}
 	type result struct {
 		Name    string `json:"name"`
 		Command string `json:"command"`
 		Passed  bool   `json:"passed"`
+		Skipped bool   `json:"skipped,omitempty"`
 		Output  string `json:"output"`
 	}
-	checks := [][]string{{"git", "diff", "--check"}}
-	if _, statErr := os.Stat(filepath.Join(project.CanonicalPath, "go.mod")); statErr == nil {
+	checks := make([][]string, 0, 8)
+	if project.IsGitRepository {
+		checks = append(checks, []string{"git", "diff", "--check"})
+	}
+	if _, statErr := os.Stat(filepath.Join(verifyRoot, "go.mod")); statErr == nil {
 		checks = append(checks, []string{"go", "test", "./..."})
 	}
-	if _, statErr := os.Stat(filepath.Join(project.CanonicalPath, "frontend", "package.json")); statErr == nil {
-		checks = append(checks, []string{"npm", "test", "--", "--run"})
+	if _, statErr := os.Stat(filepath.Join(verifyRoot, "Cargo.toml")); statErr == nil {
+		checks = append(checks, []string{"cargo", "test"})
+	}
+	npmDir := ""
+	if _, statErr := os.Stat(filepath.Join(verifyRoot, "package.json")); statErr == nil {
+		npmDir = verifyRoot
+	} else if _, statErr := os.Stat(filepath.Join(verifyRoot, "frontend", "package.json")); statErr == nil {
+		npmDir = filepath.Join(verifyRoot, "frontend")
+	}
+	if npmDir != "" {
+		for _, script := range detectedNPMScripts(filepath.Join(npmDir, "package.json")) {
+			checks = append(checks, []string{"npm", "run", script})
+		}
 	}
 	results := make([]result, 0, len(checks))
 	allPassed := true
+	if len(checks) == 0 {
+		results = append(results, result{
+			Name: "project checks", Passed: true, Skipped: true,
+			Output: "No Git repository or supported build/test configuration exists yet. Verification will become available after the implementer creates project files.",
+		})
+	}
 	for _, check := range checks {
-		cwd := project.CanonicalPath
-		if check[0] == "npm" {
-			cwd = filepath.Join(cwd, "frontend")
+		cwd := verifyRoot
+		if check[0] == "npm" && npmDir != "" {
+			cwd = npmDir
 		}
 		output, commandErr := commandOutput(context.Background(), cwd, 2*time.Minute, check[0], check[1:]...)
 		passed := commandErr == nil
@@ -1092,7 +1124,9 @@ func (a *App) RunTaskVerification(taskID string) (database.Artifact, error) {
 	}
 	content, _ := json.MarshalIndent(results, "", "  ")
 	status := "failed"
-	if allPassed {
+	if len(checks) == 0 {
+		status = "skipped"
+	} else if allPassed {
 		status = "verified"
 	}
 	timestamp := time.Now().UTC().Format(time.RFC3339Nano)
@@ -1102,6 +1136,27 @@ func (a *App) RunTaskVerification(taskID string) (database.Artifact, error) {
 		CreatedAt: timestamp, UpdatedAt: timestamp,
 	}
 	return artifact, a.store.CreateArtifact(context.Background(), artifact)
+}
+
+func detectedNPMScripts(packagePath string) []string {
+	data, err := os.ReadFile(packagePath)
+	if err != nil {
+		return nil
+	}
+	var manifest struct {
+		Scripts map[string]string `json:"scripts"`
+	}
+	if json.Unmarshal(data, &manifest) != nil {
+		return nil
+	}
+	ordered := []string{"typecheck", "lint", "test", "build"}
+	scripts := make([]string, 0, len(ordered))
+	for _, name := range ordered {
+		if strings.TrimSpace(manifest.Scripts[name]) != "" {
+			scripts = append(scripts, name)
+		}
+	}
+	return scripts
 }
 
 func commandOutput(parent context.Context, cwd string, timeout time.Duration, name string, args ...string) (string, error) {

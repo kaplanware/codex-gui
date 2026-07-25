@@ -352,8 +352,20 @@ const selectedTask = computed(() =>
   workspace.agentTasks.find((bundle) => bundle.task.id === selectedTaskId.value),
 )
 
-const selectedArtifact = computed(() => {
+const selectedTaskArtifacts = computed(() => {
   const artifacts = selectedTask.value?.artifacts ?? []
+  const singletonTypes = new Set(['verification', 'snapshot', 'preflight', 'plan'])
+  const seen = new Set<string>()
+  return artifacts.filter((artifact) => {
+    if (!singletonTypes.has(artifact.type)) return true
+    if (seen.has(artifact.type)) return false
+    seen.add(artifact.type)
+    return true
+  })
+})
+
+const selectedArtifact = computed(() => {
+  const artifacts = selectedTaskArtifacts.value
   return (
     artifacts.find((artifact) => artifact.id === selectedArtifactId.value) ??
     artifacts.find((artifact) => artifact.type === 'plan') ??
@@ -1201,11 +1213,11 @@ function backendOpen(path: string) {
                 <h3>Artifacts & evidence</h3>
                 <span>Plans, agent output, snapshots, diffs, and verification reports.</span>
               </div>
-              <strong>{{ selectedTask.artifacts.length }}</strong>
+              <strong>{{ selectedTaskArtifacts.length }}</strong>
             </header>
             <div class="artifact-tabs">
               <button
-                v-for="artifact in selectedTask.artifacts"
+                v-for="artifact in selectedTaskArtifacts"
                 :key="artifact.id"
                 type="button"
                 :class="{ active: selectedArtifact?.id === artifact.id }"
@@ -1234,8 +1246,12 @@ function backendOpen(path: string) {
             <button type="button" @click="workspace.createTaskSnapshot(selectedTask.task.id)">
               Snapshot
             </button>
-            <button type="button" @click="workspace.verifyTask(selectedTask.task.id)">
-              Run verification
+            <button
+              type="button"
+              :disabled="workspace.busy"
+              @click="workspace.verifyTask(selectedTask.task.id)"
+            >
+              {{ workspace.busy ? 'Verifying…' : 'Run verification' }}
             </button>
             <button
               v-if="selectedTask.task.status === 'waiting-approval'"
