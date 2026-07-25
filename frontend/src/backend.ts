@@ -1,10 +1,16 @@
 import type {
   Account,
+  AgentProvider,
+  AgentTaskBundle,
+  AgentTaskRequest,
+  ContextEntry,
   ElicitationRequest,
   FileMatch,
   LoginStart,
   Model,
   Project,
+  ProjectMemory,
+  PreflightCheck,
   RateLimits,
   StartupStatus,
   Thread,
@@ -27,6 +33,25 @@ export const backend = {
   getAccount: () => app().GetAccount() as Promise<Account>,
   getRateLimits: () => app().GetRateLimits() as Promise<RateLimits>,
   listModels: () => app().ListModels() as Promise<Model[]>,
+  listAgentProviders: () => app().ListAgentProviders() as Promise<AgentProvider[]>,
+  listAgentTasks: (projectId = '') =>
+    app().ListAgentTasks(projectId) as Promise<AgentTaskBundle[]>,
+  createAgentTask: (request: AgentTaskRequest) =>
+    app().CreateAgentTask(request) as Promise<AgentTaskBundle>,
+  preflightProject: (projectId: string) =>
+    app().PreflightProject(projectId) as Promise<PreflightCheck[]>,
+  inspectProjectContext: (projectId: string) =>
+    app().InspectProjectContext(projectId) as Promise<ContextEntry[]>,
+  createTaskSnapshot: (taskId: string) => app().CreateTaskSnapshot(taskId),
+  createTaskWorktree: (taskId: string) => app().CreateTaskWorktree(taskId),
+  runTaskVerification: (taskId: string) => app().RunTaskVerification(taskId),
+  approveAgentTaskStage: (taskId: string) => app().ApproveAgentTaskStage(taskId),
+  listProjectMemory: (projectId: string) =>
+    app().ListProjectMemory(projectId) as Promise<ProjectMemory[]>,
+  proposeProjectMemory: (projectId: string, kind: string, title: string, content: string) =>
+    app().ProposeProjectMemory(projectId, kind, title, content) as Promise<ProjectMemory>,
+  reviewProjectMemory: (id: string, decision: 'approved' | 'rejected') =>
+    app().ReviewProjectMemory(id, decision),
   loginWithChatGPT: () => app().LoginWithChatGPT() as Promise<LoginStart>,
   loginWithDeviceCode: () => app().LoginWithDeviceCode() as Promise<LoginStart>,
   logout: () => app().Logout(),

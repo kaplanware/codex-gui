@@ -16,7 +16,7 @@ func main() {
 	app := NewApp()
 
 	err := wails.Run(&options.App{
-		Title:            "Linux Codex Desktop",
+		Title:            "Agent Workspace",
 		Width:            1180,
 		Height:           760,
 		MinWidth:         820,

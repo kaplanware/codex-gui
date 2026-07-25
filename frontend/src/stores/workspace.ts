@@ -3,13 +3,19 @@ import { defineStore } from 'pinia'
 import { backend, subscribe } from '../backend'
 import type {
   Account,
+  AgentProvider,
+  AgentTaskBundle,
+  AgentTaskRequest,
   Approval,
   ConversationItem,
+  ContextEntry,
   ElicitationRequest,
   FileMatch,
   MentionInput,
   Model,
   Project,
+  ProjectMemory,
+  PreflightCheck,
   RateLimits,
   Thread,
   TurnOptions,
@@ -43,6 +49,11 @@ export const useWorkspaceStore = defineStore('workspace', {
     account: null as Account | null,
     rateLimits: null as RateLimits | null,
     models: [] as Model[],
+    agentProviders: [] as AgentProvider[],
+    agentTasks: [] as AgentTaskBundle[],
+    preflight: [] as PreflightCheck[],
+    contextEntries: [] as ContextEntry[],
+    projectMemory: [] as ProjectMemory[],
     selectedModel: '',
     selectedEffort: '',
     selectedMode: 'default' as 'default' | 'plan',
@@ -100,7 +111,8 @@ export const useWorkspaceStore = defineStore('workspace', {
           }
         }),
         subscribe('codex:agent-message-delta', (payload) => {
-          const event = payload as { itemId: string; delta: string }
+          const event = payload as { itemId: string; delta: string; threadId?: string }
+          if (event.threadId && event.threadId !== this.activeThread?.id) return
           let item = this.items.find((candidate) => candidate.id === event.itemId)
           if (!item) {
             item = { id: event.itemId, type: 'agentMessage', text: '' }
@@ -108,13 +120,24 @@ export const useWorkspaceStore = defineStore('workspace', {
           }
           item.text = `${item.text ?? ''}${event.delta}`
         }),
-        subscribe('codex:item', (payload) => this.applyItem(payload as ItemEnvelope)),
+        subscribe('codex:item', (payload) => {
+          const envelope = payload as ItemEnvelope
+          if (
+            envelope.payload.threadId &&
+            envelope.payload.threadId !== this.activeThread?.id
+          )
+            return
+          this.applyItem(envelope)
+        }),
         subscribe('codex:command-output-delta', (payload) => {
           const event = payload as { itemId: string; delta: string }
           const item = this.items.find((candidate) => candidate.id === event.itemId)
           if (item) item.aggregatedOutput = `${item.aggregatedOutput ?? ''}${event.delta}`
         }),
-        subscribe('codex:turn-completed', () => {
+        subscribe('codex:turn-completed', (payload) => {
+          const event = payload as { thread?: { id?: string }; threadId?: string }
+          const threadId = event.threadId ?? event.thread?.id
+          if (threadId && threadId !== this.activeThread?.id) return
           if (this.lastTurnMode === 'plan') {
             const plan = [...this.items]
               .reverse()
@@ -144,6 +167,7 @@ export const useWorkspaceStore = defineStore('workspace', {
         subscribe('codex:elicitation-requested', (payload) => {
           this.elicitations.push(payload as ElicitationRequest)
         }),
+        subscribe('agents:tasks-updated', () => void this.loadAgentTasks()),
       )
     },
     disconnectEvents() {
@@ -172,6 +196,81 @@ export const useWorkspaceStore = defineStore('workspace', {
       } catch (error) {
         this.error = message(error)
       }
+    },
+    async loadAgentWorkspace() {
+      try {
+        const projectId = this.activeProject?.id ?? ''
+        const [providers, tasks] = await Promise.all([
+          backend.listAgentProviders(),
+          backend.listAgentTasks(projectId),
+        ])
+        this.agentProviders = providers
+        this.agentTasks = tasks
+        if (projectId) {
+          const [preflight, contextEntries, projectMemory] = await Promise.all([
+            backend.preflightProject(projectId),
+            backend.inspectProjectContext(projectId),
+            backend.listProjectMemory(projectId),
+          ])
+          this.preflight = preflight
+          this.contextEntries = contextEntries
+          this.projectMemory = projectMemory
+        }
+      } catch (error) {
+        this.error = message(error)
+      }
+    },
+    async loadAgentTasks() {
+      try {
+        this.agentTasks = await backend.listAgentTasks(this.activeProject?.id ?? '')
+      } catch (error) {
+        this.error = message(error)
+      }
+    },
+    async createAgentTask(request: Omit<AgentTaskRequest, 'projectId'>) {
+      if (!this.activeProject) return
+      await this.run(async () => {
+        await backend.createAgentTask({ ...request, projectId: this.activeProject!.id })
+        await this.loadAgentTasks()
+      })
+    },
+    async createTaskSnapshot(taskId: string) {
+      await this.run(async () => {
+        await backend.createTaskSnapshot(taskId)
+        await this.loadAgentTasks()
+      })
+    },
+    async createTaskWorktree(taskId: string) {
+      await this.run(async () => {
+        await backend.createTaskWorktree(taskId)
+        await this.loadAgentTasks()
+      })
+    },
+    async verifyTask(taskId: string) {
+      await this.run(async () => {
+        await backend.runTaskVerification(taskId)
+        await this.loadAgentTasks()
+      })
+    },
+    async approveTaskStage(taskId: string) {
+      await this.run(async () => {
+        await backend.approveAgentTaskStage(taskId)
+        await this.loadAgentTasks()
+      })
+    },
+    async proposeMemory(kind: string, title: string, content: string) {
+      if (!this.activeProject || !title.trim() || !content.trim()) return
+      await this.run(async () => {
+        await backend.proposeProjectMemory(this.activeProject!.id, kind, title, content)
+        this.projectMemory = await backend.listProjectMemory(this.activeProject!.id)
+      })
+    },
+    async reviewMemory(id: string, decision: 'approved' | 'rejected') {
+      if (!this.activeProject) return
+      await this.run(async () => {
+        await backend.reviewProjectMemory(id, decision)
+        this.projectMemory = await backend.listProjectMemory(this.activeProject!.id)
+      })
     },
     setModel(id: string) {
       this.selectedModel = id
@@ -242,6 +341,7 @@ export const useWorkspaceStore = defineStore('workspace', {
       this.diff = ''
       this.queue = []
       await this.loadThreads(project.id)
+      void this.loadAgentWorkspace()
     },
     async loadThreads(projectId: string) {
       this.threadsByProject[projectId] = await backend.listThreads(projectId)

@@ -9,11 +9,14 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/kaplanware/codex-gui/internal/agents"
 	"github.com/kaplanware/codex-gui/internal/codex"
 	"github.com/kaplanware/codex-gui/internal/database"
 	"github.com/kaplanware/codex-gui/internal/projects"
@@ -21,18 +24,29 @@ import (
 )
 
 type App struct {
-	ctx         context.Context
-	manager     *codex.Manager
-	store       *database.Store
-	projects    *projects.Service
-	databaseErr error
-	logger      *slog.Logger
+	ctx           context.Context
+	manager       *codex.Manager
+	store         *database.Store
+	projects      *projects.Service
+	databaseErr   error
+	logger        *slog.Logger
+	agentRegistry *agents.Registry
+	runMu         sync.Mutex
+	turnRuns      map[string]runReference
+}
+
+type runReference struct {
+	TaskID string
+	RunID  string
 }
 
 func NewApp() *App {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	store, err := database.Open()
-	app := &App{manager: codex.NewManager(logger), store: store, databaseErr: err, logger: logger}
+	app := &App{
+		manager: codex.NewManager(logger), store: store, databaseErr: err, logger: logger,
+		agentRegistry: agents.NewRegistry(), turnRuns: make(map[string]runReference),
+	}
 	if store != nil {
 		app.projects = projects.NewService(store)
 	}
@@ -46,10 +60,26 @@ func (a *App) startup(ctx context.Context) {
 		runtime.EventsEmit(ctx, name, payload)
 	})
 	go func() {
+		a.agentRegistry.Detect(context.Background())
 		if err := a.manager.Start(context.Background()); err != nil {
 			slog.Debug("automatic Codex connection failed", "error", err)
 		}
 	}()
+}
+
+type AgentTaskRequest struct {
+	ProjectID string            `json:"projectId"`
+	Title     string            `json:"title"`
+	Prompt    string            `json:"prompt"`
+	Workflow  string            `json:"workflow"`
+	Roles     []string          `json:"roles"`
+	Providers map[string]string `json:"providers"`
+}
+
+type AgentTaskBundle struct {
+	Task      database.Task       `json:"task"`
+	Runs      []database.AgentRun `json:"runs"`
+	Artifacts []database.Artifact `json:"artifacts"`
 }
 
 func (a *App) shutdown(_ context.Context) {
@@ -257,6 +287,308 @@ func (a *App) ListModels() ([]ModelView, error) {
 	return models, nil
 }
 
+func (a *App) ListAgentProviders() []agents.ProviderStatus {
+	return a.agentRegistry.Detect(context.Background())
+}
+
+func (a *App) ListAgentTasks(projectID string) ([]AgentTaskBundle, error) {
+	if err := a.requireDatabase(); err != nil {
+		return nil, err
+	}
+	tasks, err := a.store.ListTasks(context.Background(), projectID)
+	if err != nil {
+		return nil, err
+	}
+	bundles := make([]AgentTaskBundle, 0, len(tasks))
+	for _, task := range tasks {
+		runs, runErr := a.store.ListRuns(context.Background(), task.ID)
+		if runErr != nil {
+			return nil, runErr
+		}
+		artifacts, artifactErr := a.store.ListArtifacts(context.Background(), task.ID)
+		if artifactErr != nil {
+			return nil, artifactErr
+		}
+		bundles = append(bundles, AgentTaskBundle{Task: task, Runs: runs, Artifacts: artifacts})
+	}
+	return bundles, nil
+}
+
+func (a *App) CreateAgentTask(request AgentTaskRequest) (AgentTaskBundle, error) {
+	if err := a.requireDatabase(); err != nil {
+		return AgentTaskBundle{}, err
+	}
+	request.Title = strings.TrimSpace(request.Title)
+	request.Prompt = strings.TrimSpace(request.Prompt)
+	if request.ProjectID == "" || request.Prompt == "" {
+		return AgentTaskBundle{}, errors.New("project and task prompt are required")
+	}
+	if _, err := a.projects.Get(context.Background(), request.ProjectID); err != nil {
+		return AgentTaskBundle{}, err
+	}
+	if request.Title == "" {
+		request.Title = request.Prompt
+		if len([]rune(request.Title)) > 72 {
+			request.Title = string([]rune(request.Title)[:72]) + "…"
+		}
+	}
+	if request.Workflow == "" {
+		request.Workflow = "delivery"
+	}
+	if len(request.Roles) == 0 {
+		request.Roles = []string{"planner", "implementer", "reviewer"}
+	}
+	timestamp := time.Now().UTC().Format(time.RFC3339Nano)
+	task := database.Task{
+		ID: newLocalID("task"), ProjectID: request.ProjectID, Title: request.Title,
+		Prompt: request.Prompt, Mode: request.Workflow, Status: "queued",
+		CreatedAt: timestamp, UpdatedAt: timestamp,
+	}
+	if err := a.store.CreateTask(context.Background(), task); err != nil {
+		return AgentTaskBundle{}, err
+	}
+	providers := a.agentRegistry.Statuses()
+	if len(providers) == 0 {
+		providers = a.agentRegistry.Detect(context.Background())
+	}
+	runs := make([]database.AgentRun, 0, len(request.Roles))
+	for index, role := range request.Roles {
+		providerID := request.Providers[role]
+		if providerID == "" || providerID == "auto" {
+			providerID = routeProvider(role, providers)
+		}
+		status := "queued"
+		if !providerAvailable(providerID, providers) {
+			status = "unavailable"
+		}
+		run := database.AgentRun{
+			ID: newLocalID("run"), TaskID: task.ID, ProviderID: providerID,
+			Role: role, Position: index, Status: status, Progress: 0,
+		}
+		if request.Workflow == "delivery" && index > 0 && status == "queued" {
+			run.Status = "blocked"
+		}
+		if err := a.store.CreateRun(context.Background(), run); err != nil {
+			return AgentTaskBundle{}, err
+		}
+		runs = append(runs, run)
+	}
+	preflight, _ := json.MarshalIndent(a.PreflightProject(request.ProjectID), "", "  ")
+	artifact := database.Artifact{
+		ID: newLocalID("artifact"), TaskID: task.ID, Type: "preflight",
+		Title: "Preflight report", Status: "generated", Content: string(preflight),
+		CreatedAt: timestamp, UpdatedAt: timestamp,
+	}
+	_ = a.store.CreateArtifact(context.Background(), artifact)
+	artifacts := []database.Artifact{artifact}
+	if snapshot, snapshotErr := a.CreateTaskSnapshot(task.ID); snapshotErr == nil {
+		artifacts = append(artifacts, snapshot)
+	}
+	go a.startEligibleRuns(task.ID)
+	return AgentTaskBundle{Task: task, Runs: runs, Artifacts: artifacts}, nil
+}
+
+func (a *App) PreflightProject(projectID string) []agents.PreflightCheck {
+	project, err := a.projects.Get(context.Background(), projectID)
+	if err != nil {
+		return []agents.PreflightCheck{{ID: "project", Label: "Project", Status: "failed", Detail: err.Error(), Blocking: true}}
+	}
+	return agents.Preflight(context.Background(), project.CanonicalPath)
+}
+
+func (a *App) InspectProjectContext(projectID string) ([]agents.ContextEntry, error) {
+	project, err := a.projects.Get(context.Background(), projectID)
+	if err != nil {
+		return nil, err
+	}
+	return agents.InspectContext(project.CanonicalPath)
+}
+
+func (a *App) AssessCommandRisk(projectID, command string) (agents.RiskAssessment, error) {
+	project, err := a.projects.Get(context.Background(), projectID)
+	if err != nil {
+		return agents.RiskAssessment{}, err
+	}
+	return agents.AssessCommand(command, project.CanonicalPath), nil
+}
+
+func (a *App) ListProjectMemory(projectID string) ([]database.ProjectMemory, error) {
+	return a.store.ListMemory(context.Background(), projectID)
+}
+
+func (a *App) ProposeProjectMemory(projectID, kind, title, content string) (database.ProjectMemory, error) {
+	if _, err := a.projects.Get(context.Background(), projectID); err != nil {
+		return database.ProjectMemory{}, err
+	}
+	memory := database.ProjectMemory{
+		ID: newLocalID("memory"), ProjectID: projectID, Kind: kind, Title: title,
+		Content: content, Status: "proposed", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	return memory, a.store.AddMemory(context.Background(), memory)
+}
+
+func (a *App) ReviewProjectMemory(id, decision string) error {
+	if decision != "approved" && decision != "rejected" {
+		return errors.New("memory decision must be approved or rejected")
+	}
+	return a.store.UpdateMemoryStatus(context.Background(), id, decision)
+}
+
+func (a *App) ApproveAgentTaskStage(taskID string) error {
+	runs, err := a.store.ListRuns(context.Background(), taskID)
+	if err != nil {
+		return err
+	}
+	for _, run := range runs {
+		if run.Status == "blocked" {
+			if err := a.store.UpdateRun(context.Background(), run.ID, "queued", 0, "Human approval granted", ""); err != nil {
+				return err
+			}
+			_ = a.store.UpdateTaskStatus(context.Background(), taskID, "running")
+			go a.startEligibleRuns(taskID)
+			a.emitAgentTasksChanged()
+			return nil
+		}
+	}
+	return errors.New("task has no stage waiting for approval")
+}
+
+func (a *App) CreateTaskSnapshot(taskID string) (database.Artifact, error) {
+	task, err := a.store.GetTask(context.Background(), taskID)
+	if err != nil {
+		return database.Artifact{}, err
+	}
+	project, err := a.projects.Get(context.Background(), task.ProjectID)
+	if err != nil {
+		return database.Artifact{}, err
+	}
+	head, _ := commandOutput(context.Background(), project.CanonicalPath, 5*time.Second, "git", "rev-parse", "HEAD")
+	status, _ := commandOutput(context.Background(), project.CanonicalPath, 5*time.Second, "git", "status", "--porcelain=v1")
+	diff, _ := commandOutput(context.Background(), project.CanonicalPath, 10*time.Second, "git", "diff", "--binary")
+	content, _ := json.MarshalIndent(map[string]any{
+		"gitSha": strings.TrimSpace(head), "dirtyState": strings.Split(strings.TrimSpace(status), "\n"),
+		"diff": diff, "project": project.CanonicalPath, "capturedAt": time.Now().UTC(),
+	}, "", "  ")
+	timestamp := time.Now().UTC().Format(time.RFC3339Nano)
+	artifact := database.Artifact{
+		ID: newLocalID("snapshot"), TaskID: taskID, Type: "snapshot", Title: "Pre-run snapshot",
+		Status: "available", Content: string(content), CreatedAt: timestamp, UpdatedAt: timestamp,
+	}
+	return artifact, a.store.CreateArtifact(context.Background(), artifact)
+}
+
+func (a *App) CreateTaskWorktree(taskID string) (database.Artifact, error) {
+	task, err := a.store.GetTask(context.Background(), taskID)
+	if err != nil {
+		return database.Artifact{}, err
+	}
+	project, err := a.projects.Get(context.Background(), task.ProjectID)
+	if err != nil {
+		return database.Artifact{}, err
+	}
+	if !project.IsGitRepository {
+		return database.Artifact{}, errors.New("isolated worktrees require a Git repository")
+	}
+	root, err := agentWorktreeRoot(project.ID)
+	if err != nil {
+		return database.Artifact{}, err
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return database.Artifact{}, err
+	}
+	target := filepath.Join(root, task.ID)
+	branch := "agent-workspace/" + task.ID
+	output, err := commandOutput(context.Background(), project.CanonicalPath, 30*time.Second,
+		"git", "worktree", "add", "-b", branch, target, "HEAD")
+	if err != nil {
+		return database.Artifact{}, fmt.Errorf("create worktree: %w: %s", err, output)
+	}
+	timestamp := time.Now().UTC().Format(time.RFC3339Nano)
+	artifact := database.Artifact{
+		ID: newLocalID("worktree"), TaskID: taskID, Type: "worktree", Title: "Disposable worktree",
+		Status: "available", Content: target, CreatedAt: timestamp, UpdatedAt: timestamp,
+	}
+	return artifact, a.store.CreateArtifact(context.Background(), artifact)
+}
+
+func agentWorktreeRoot(projectID string) (string, error) {
+	dataHome := os.Getenv("XDG_DATA_HOME")
+	if dataHome == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		dataHome = filepath.Join(home, ".local", "share")
+	}
+	return filepath.Join(dataHome, "linux-codex-desktop", "worktrees", projectID), nil
+}
+
+func (a *App) RunTaskVerification(taskID string) (database.Artifact, error) {
+	task, err := a.store.GetTask(context.Background(), taskID)
+	if err != nil {
+		return database.Artifact{}, err
+	}
+	project, err := a.projects.Get(context.Background(), task.ProjectID)
+	if err != nil {
+		return database.Artifact{}, err
+	}
+	type result struct {
+		Name    string `json:"name"`
+		Command string `json:"command"`
+		Passed  bool   `json:"passed"`
+		Output  string `json:"output"`
+	}
+	checks := [][]string{{"git", "diff", "--check"}}
+	if _, statErr := os.Stat(filepath.Join(project.CanonicalPath, "go.mod")); statErr == nil {
+		checks = append(checks, []string{"go", "test", "./..."})
+	}
+	if _, statErr := os.Stat(filepath.Join(project.CanonicalPath, "frontend", "package.json")); statErr == nil {
+		checks = append(checks, []string{"npm", "test", "--", "--run"})
+	}
+	results := make([]result, 0, len(checks))
+	allPassed := true
+	for _, check := range checks {
+		cwd := project.CanonicalPath
+		if check[0] == "npm" {
+			cwd = filepath.Join(cwd, "frontend")
+		}
+		output, commandErr := commandOutput(context.Background(), cwd, 2*time.Minute, check[0], check[1:]...)
+		passed := commandErr == nil
+		allPassed = allPassed && passed
+		results = append(results, result{
+			Name: check[0], Command: strings.Join(check, " "), Passed: passed, Output: truncate(output, 12000),
+		})
+	}
+	content, _ := json.MarshalIndent(results, "", "  ")
+	status := "failed"
+	if allPassed {
+		status = "verified"
+	}
+	timestamp := time.Now().UTC().Format(time.RFC3339Nano)
+	artifact := database.Artifact{
+		ID: newLocalID("verification"), TaskID: taskID, Type: "verification",
+		Title: "Verification report", Status: status, Content: string(content),
+		CreatedAt: timestamp, UpdatedAt: timestamp,
+	}
+	return artifact, a.store.CreateArtifact(context.Background(), artifact)
+}
+
+func commandOutput(parent context.Context, cwd string, timeout time.Duration, name string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	command := exec.CommandContext(ctx, name, args...)
+	command.Dir = cwd
+	output, err := command.CombinedOutput()
+	return string(output), err
+}
+
+func truncate(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "\n…truncated"
+}
+
 func (a *App) LoginWithChatGPT() (LoginStart, error) {
 	var response LoginStart
 	err := a.call("account/login/start", map[string]any{
@@ -340,6 +672,10 @@ func (a *App) StartThread(projectID string) (ThreadView, error) {
 	if err != nil {
 		return ThreadView{}, err
 	}
+	return a.startThreadAt(projectID, project.CanonicalPath)
+}
+
+func (a *App) startThreadAt(projectID, cwd string) (ThreadView, error) {
 	var response struct {
 		Thread struct {
 			ID        string `json:"id"`
@@ -347,8 +683,8 @@ func (a *App) StartThread(projectID string) (ThreadView, error) {
 			UpdatedAt int64  `json:"updatedAt"`
 		} `json:"thread"`
 	}
-	err = a.call("thread/start", map[string]any{
-		"cwd": project.CanonicalPath, "approvalPolicy": "on-request", "sandbox": "workspace-write",
+	err := a.call("thread/start", map[string]any{
+		"cwd": cwd, "approvalPolicy": "on-request", "sandbox": "workspace-write",
 	}, &response)
 	if err != nil {
 		return ThreadView{}, err
@@ -384,8 +720,12 @@ func (a *App) ResumeThread(threadID string) (ThreadView, error) {
 			} `json:"turns"`
 		} `json:"thread"`
 	}
+	cwd := project.CanonicalPath
+	if run, runErr := a.store.GetRunByThread(context.Background(), threadID); runErr == nil && run.Worktree != "" {
+		cwd = run.Worktree
+	}
 	if err := a.call("thread/resume", map[string]any{
-		"threadId": threadID, "cwd": project.CanonicalPath,
+		"threadId": threadID, "cwd": cwd,
 	}, &response); err != nil {
 		return ThreadView{}, err
 	}
@@ -743,6 +1083,205 @@ func (a *App) call(method string, params, result any) error {
 	return a.manager.Call(ctx, method, params, result)
 }
 
+func (a *App) startEligibleRuns(taskID string) {
+	task, err := a.store.GetTask(context.Background(), taskID)
+	if err != nil {
+		return
+	}
+	runs, err := a.store.ListRuns(context.Background(), taskID)
+	if err != nil {
+		return
+	}
+	started := false
+	for _, run := range runs {
+		if run.Status != "queued" {
+			continue
+		}
+		started = true
+		if run.ProviderID != "codex" {
+			_ = a.store.UpdateRun(context.Background(), run.ID, "unavailable", 0, "Provider execution adapter is not available yet.", "")
+			continue
+		}
+		if err := a.startCodexAgentRun(task, run); err != nil {
+			_ = a.store.UpdateRun(context.Background(), run.ID, "failed", 0, err.Error(), "")
+		}
+		if task.Mode == "delivery" {
+			break
+		}
+	}
+	if started {
+		_ = a.store.UpdateTaskStatus(context.Background(), taskID, "running")
+		a.emitAgentTasksChanged()
+	}
+}
+
+func (a *App) startCodexAgentRun(task database.Task, run database.AgentRun) error {
+	project, err := a.projects.Get(context.Background(), task.ProjectID)
+	if err != nil {
+		return err
+	}
+	cwd := project.CanonicalPath
+	if task.Mode == "parallel" && project.IsGitRepository {
+		cwd, err = a.createRunWorktree(project, run)
+		if err != nil {
+			return err
+		}
+		if err := a.store.SetRunWorktree(context.Background(), run.ID, cwd); err != nil {
+			return err
+		}
+	}
+	thread, err := a.startThreadAt(task.ProjectID, cwd)
+	if err != nil {
+		return err
+	}
+	prompt := rolePrompt(run.Role, task.Prompt)
+	mode := "default"
+	if run.Role == "planner" {
+		mode = "plan"
+	}
+	turn, err := a.SendMessageWithOptions(thread.ID, prompt, TurnOptions{Mode: mode})
+	if err != nil {
+		return err
+	}
+	a.runMu.Lock()
+	a.turnRuns[turn.TurnID] = runReference{TaskID: task.ID, RunID: run.ID}
+	a.runMu.Unlock()
+	if err := a.store.UpdateRun(context.Background(), run.ID, "running", 10, "Codex session started", thread.ID); err != nil {
+		return err
+	}
+	a.emitAgentTasksChanged()
+	return nil
+}
+
+func (a *App) createRunWorktree(project database.Project, run database.AgentRun) (string, error) {
+	root, err := agentWorktreeRoot(project.ID)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return "", err
+	}
+	target := filepath.Join(root, run.ID)
+	branch := "agent-workspace/" + run.ID
+	output, err := commandOutput(context.Background(), project.CanonicalPath, 30*time.Second,
+		"git", "worktree", "add", "-b", branch, target, "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("create isolated run worktree: %w: %s", err, output)
+	}
+	return target, nil
+}
+
+func (a *App) completeAgentRun(turnID string) {
+	a.runMu.Lock()
+	reference, ok := a.turnRuns[turnID]
+	if ok {
+		delete(a.turnRuns, turnID)
+	}
+	a.runMu.Unlock()
+	if !ok {
+		return
+	}
+	_ = a.store.UpdateRun(context.Background(), reference.RunID, "completed", 100, "Run completed", "")
+	task, err := a.store.GetTask(context.Background(), reference.TaskID)
+	if err != nil {
+		return
+	}
+	runs, err := a.store.ListRuns(context.Background(), reference.TaskID)
+	if err != nil {
+		return
+	}
+	if task.Mode == "delivery" {
+		for _, run := range runs {
+			if run.ID == reference.RunID && run.Role == "planner" {
+				_ = a.store.UpdateTaskStatus(context.Background(), reference.TaskID, "waiting-approval")
+				timestamp := time.Now().UTC().Format(time.RFC3339Nano)
+				_ = a.store.CreateArtifact(context.Background(), database.Artifact{
+					ID: newLocalID("plan"), TaskID: reference.TaskID, RunID: reference.RunID,
+					Type: "plan", Title: "Implementation plan", Status: "needs-review",
+					Content:   "Open the planner thread to review the complete plan, then approve the next workflow stage.",
+					CreatedAt: timestamp, UpdatedAt: timestamp,
+				})
+				a.emitAgentTasksChanged()
+				return
+			}
+		}
+		for _, run := range runs {
+			if run.Status == "blocked" {
+				_ = a.store.UpdateRun(context.Background(), run.ID, "queued", 0, "Previous workflow stage completed", "")
+				go a.startEligibleRuns(reference.TaskID)
+				a.emitAgentTasksChanged()
+				return
+			}
+		}
+	}
+	allTerminal := true
+	for _, run := range runs {
+		if run.Status == "queued" || run.Status == "blocked" || run.Status == "running" {
+			allTerminal = false
+		}
+	}
+	if allTerminal {
+		_ = a.store.UpdateTaskStatus(context.Background(), reference.TaskID, "completed")
+		timestamp := time.Now().UTC().Format(time.RFC3339Nano)
+		_ = a.store.CreateArtifact(context.Background(), database.Artifact{
+			ID: newLocalID("artifact"), TaskID: reference.TaskID, Type: "verification",
+			Title: "Workflow completion", Status: "needs-review",
+			Content:   "All configured agent runs reached a terminal state. Review each provider thread and verification evidence before merge.",
+			CreatedAt: timestamp, UpdatedAt: timestamp,
+		})
+	}
+	a.emitAgentTasksChanged()
+}
+
+func (a *App) emitAgentTasksChanged() {
+	if a.ctx != nil {
+		runtime.EventsEmit(a.ctx, "agents:tasks-updated", nil)
+	}
+}
+
+func rolePrompt(role, prompt string) string {
+	switch role {
+	case "planner":
+		return "Act as the planning agent for this task. Analyze only and produce a decision-ready plan; do not implement.\n\nTask:\n" + prompt
+	case "reviewer":
+		return "Act as an independent reviewer. Inspect the current repository state and task outcome. Report correctness, architecture, security, regressions, and required revisions. Do not modify files.\n\nOriginal task:\n" + prompt
+	case "security":
+		return "Act as an independent security reviewer. Inspect the implementation for trust-boundary, injection, permission, secret, and destructive-operation risks. Do not modify files.\n\nOriginal task:\n" + prompt
+	case "browser-qa":
+		return "Act as browser QA. Inspect the requested user flow and produce a verification checklist and findings. Use available browser tooling when configured.\n\nOriginal task:\n" + prompt
+	default:
+		return "Act as the implementation agent. Implement the task safely, preserve unrelated changes, and run relevant verification.\n\nTask:\n" + prompt
+	}
+}
+
+func routeProvider(role string, providers []agents.ProviderStatus) string {
+	preferred := []string{"codex", "claude", "gemini", "opencode", "ollama"}
+	if role == "browser-qa" {
+		preferred = []string{"antigravity", "codex", "claude"}
+	} else if role == "reviewer" || role == "planner" {
+		preferred = []string{"claude", "codex", "gemini", "ollama"}
+	}
+	for _, id := range preferred {
+		if providerAvailable(id, providers) {
+			return id
+		}
+	}
+	return preferred[0]
+}
+
+func providerAvailable(id string, providers []agents.ProviderStatus) bool {
+	for _, provider := range providers {
+		if provider.ID == id {
+			return provider.Runnable
+		}
+	}
+	return false
+}
+
+func newLocalID(prefix string) string {
+	return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+}
+
 func (a *App) requireDatabase() error {
 	if a.databaseErr != nil {
 		return a.databaseErr
@@ -800,6 +1339,9 @@ func (a *App) handleProtocolMessage(method string, id, params []byte) {
 		emit("codex:turn-started", payload)
 	case "turn/completed":
 		emit("codex:turn-completed", payload)
+		if turnID := nestedString(payload, "turn", "id"); turnID != "" {
+			go a.completeAgentRun(turnID)
+		}
 	case "item/started", "item/updated", "item/completed":
 		emit("codex:item", map[string]any{"event": method, "payload": payload})
 	case "item/agentMessage/delta":
@@ -809,7 +1351,13 @@ func (a *App) handleProtocolMessage(method string, id, params []byte) {
 	case "turn/diff/updated":
 		emit("codex:diff-updated", payload)
 	case "item/commandExecution/requestApproval":
-		emit("codex:approval-requested", approvalPayload("command", id, payload))
+		approval := approvalPayload("command", id, payload)
+		if details, ok := approval["details"].(map[string]any); ok {
+			command, _ := details["command"].(string)
+			cwd, _ := details["cwd"].(string)
+			details["risk"] = agents.AssessCommand(command, cwd)
+		}
+		emit("codex:approval-requested", approval)
 	case "item/fileChange/requestApproval":
 		emit("codex:approval-requested", approvalPayload("file", id, payload))
 	case "item/permissions/requestApproval":
@@ -823,6 +1371,19 @@ func (a *App) handleProtocolMessage(method string, id, params []byte) {
 			"requestId": string(id), "details": payload,
 		})
 	}
+}
+
+func nestedString(value any, keys ...string) string {
+	current := value
+	for _, key := range keys {
+		object, ok := current.(map[string]any)
+		if !ok {
+			return ""
+		}
+		current = object[key]
+	}
+	text, _ := current.(string)
+	return text
 }
 
 func approvalPayload(kind string, id []byte, payload any) map[string]any {

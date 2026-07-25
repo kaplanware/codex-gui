@@ -98,7 +98,7 @@ func (m *Manager) start(ctx context.Context) error {
 	m.mu.Unlock()
 	m.transition(StateInitializing, nil)
 	err = client.Start(ctx, installation.Path, ClientInfo{
-		Name: "linux_codex_desktop", Title: "Linux Codex Desktop", Version: "0.1.0-alpha.1",
+		Name: "agent_workspace", Title: "Agent Workspace", Version: "0.1.0-alpha.1",
 	}, map[string]any{"experimentalApi": true})
 	if err != nil {
 		appErr := &AppError{
@@ -153,7 +153,7 @@ func (m *Manager) Status() StartupStatus {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	status := StartupStatus{
-		AppName: "Linux Codex Desktop", AppVersion: "0.1.0-alpha.1",
+		AppName: "Agent Workspace", AppVersion: "0.1.0-alpha.1",
 		Platform: runtime.GOOS + "/" + runtime.GOARCH, State: m.state,
 		Installation: m.installation, LastError: m.lastError,
 		UpdatedAt: m.updatedAt.UTC().Format(time.RFC3339Nano),

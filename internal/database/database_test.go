@@ -26,6 +26,32 @@ func TestProjectAndThreadPersistence(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpsertThread() error = %v", err)
 	}
+	task := Task{
+		ID: "task-1", ProjectID: "p1", Title: "Deliver feature", Prompt: "Implement it",
+		Mode: "delivery", Status: "queued", CreatedAt: now(), UpdatedAt: now(),
+	}
+	if err := store.CreateTask(ctx, task); err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	if err := store.CreateRun(ctx, AgentRun{
+		ID: "run-1", TaskID: task.ID, ProviderID: "codex", Role: "planner", Status: "queued",
+	}); err != nil {
+		t.Fatalf("CreateRun() error = %v", err)
+	}
+	if err := store.CreateArtifact(ctx, Artifact{
+		ID: "artifact-1", TaskID: task.ID, Type: "plan", Title: "Plan",
+		Status: "needs-review", Content: "Step 1", CreatedAt: now(), UpdatedAt: now(),
+	}); err != nil {
+		t.Fatalf("CreateArtifact() error = %v", err)
+	}
+	tasks, err := store.ListTasks(ctx, "p1")
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("ListTasks() = %v, %v", tasks, err)
+	}
+	runs, err := store.ListRuns(ctx, task.ID)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("ListRuns() = %v, %v", runs, err)
+	}
 	projects, err := store.ListProjects(ctx)
 	if err != nil || len(projects) != 1 {
 		t.Fatalf("ListProjects() = %v, %v", projects, err)

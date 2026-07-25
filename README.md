@@ -1,17 +1,18 @@
-# Linux Codex Desktop
+# Agent Workspace
 
-An open-source, lightweight Codex workspace built for Linux.
+The open-source command center for coding agents on Linux.
 
-Linux Codex Desktop is a native desktop host for the official Codex runtime. It
-uses Go and Wails for process and desktop integration, Vue 3 for the interface,
-and communicates with `codex app-server` over local stdio JSONL.
+Agent Workspace is a local control plane for planning, running, reviewing, and
+verifying coding-agent work. Codex is the first executable provider; Claude
+Code, Antigravity, Gemini, OpenCode, and Ollama are detected through the common
+provider registry and become selectable when their local adapters are available.
 
 > This is an independent open-source client and is not an official OpenAI
 > product. Codex, ChatGPT, and OpenAI are trademarks of their respective owner.
 
 ## Current status
 
-The core local workspace flow is implemented:
+The local workspace and orchestration foundation is implemented:
 
 - Wails v2 and Vue 3/TypeScript application foundation
 - Codex executable discovery and version compatibility checks
@@ -27,9 +28,17 @@ The core local workspace flow is implemented:
 - Streaming messages, command output, and turn state
 - Command/file approval prompts with once/session/reject decisions
 - Live unified turn diff viewer
+- Provider registry and capability detection
+- Agent Mission Control with persistent tasks, runs, and artifacts
+- Sequential planner → approval → implementer → reviewer delivery workflows
+- Parallel jury runs isolated in per-agent Git worktrees
+- Smart role routing across installed providers
+- Preflight checks, production guard, command risk assessment, and snapshots
+- Context Inspector with token estimates
+- Verification artifacts and human-reviewed project memory
 
-Release packaging and the post-MVP roadmap remain in progress. See
-[the development specification](docs/DOCUMENTATION.md).
+See the [Agent Workspace roadmap](docs/AGENT_WORKSPACE_ROADMAP.md) and
+[development specification](docs/DOCUMENTATION.md).
 
 ## Requirements
 

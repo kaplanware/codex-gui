@@ -12,6 +12,19 @@ declare global {
           GetAccount(): Promise<unknown>
           GetRateLimits(): Promise<unknown>
           ListModels(): Promise<unknown>
+          ListAgentProviders(): Promise<unknown>
+          ListAgentTasks(projectId: string): Promise<unknown>
+          CreateAgentTask(request: unknown): Promise<unknown>
+          PreflightProject(projectId: string): Promise<unknown>
+          InspectProjectContext(projectId: string): Promise<unknown>
+          AssessCommandRisk(projectId: string, command: string): Promise<unknown>
+          ListProjectMemory(projectId: string): Promise<unknown>
+          ProposeProjectMemory(projectId: string, kind: string, title: string, content: string): Promise<unknown>
+          ReviewProjectMemory(id: string, decision: string): Promise<void>
+          CreateTaskSnapshot(taskId: string): Promise<unknown>
+          CreateTaskWorktree(taskId: string): Promise<unknown>
+          RunTaskVerification(taskId: string): Promise<unknown>
+          ApproveAgentTaskStage(taskId: string): Promise<void>
           LoginWithChatGPT(): Promise<unknown>
           LoginWithDeviceCode(): Promise<unknown>
           Logout(): Promise<void>

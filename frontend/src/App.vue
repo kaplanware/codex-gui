@@ -13,6 +13,14 @@ const conversation = ref<HTMLElement | null>(null)
 const showDiagnostics = ref(false)
 const showUsage = ref(false)
 const showModelMenu = ref(false)
+const currentView = ref<'chat' | 'agents'>('chat')
+const taskTitle = ref('')
+const taskPrompt = ref('')
+const taskWorkflow = ref<'delivery' | 'parallel'>('delivery')
+const selectedRoles = ref(['planner', 'implementer', 'reviewer'])
+const roleProviders = ref<Record<string, string>>({})
+const memoryTitle = ref('')
+const memoryContent = ref('')
 const planFeedback = ref('')
 const userAnswers = ref<Record<string, string[]>>({})
 const elicitationValues = ref<Record<string, unknown>>({})
@@ -128,6 +136,62 @@ async function submitElicitation() {
   elicitationValues.value = {}
 }
 
+async function openMissionControl() {
+  currentView.value = 'agents'
+  await workspace.loadAgentWorkspace()
+}
+
+function toggleRole(role: string) {
+  selectedRoles.value = selectedRoles.value.includes(role)
+    ? selectedRoles.value.filter((candidate) => candidate !== role)
+    : [...selectedRoles.value, role]
+}
+
+async function createAgentTask() {
+  if (!taskPrompt.value.trim()) return
+  await workspace.createAgentTask({
+    title: taskTitle.value,
+    prompt: taskPrompt.value,
+    workflow: taskWorkflow.value,
+    roles: selectedRoles.value,
+    providers: Object.fromEntries(
+      selectedRoles.value.map((role) => [role, roleProviders.value[role] || 'auto']),
+    ),
+  })
+  taskTitle.value = ''
+  taskPrompt.value = ''
+}
+
+async function openRunThread(threadId?: string) {
+  if (!threadId || !workspace.activeProject) return
+  await workspace.loadThreads(workspace.activeProject.id)
+  const thread = workspace.threads.find((candidate) => candidate.id === threadId)
+  if (thread) {
+    await workspace.selectThread(thread)
+    currentView.value = 'chat'
+  }
+}
+
+async function proposeMemory() {
+  await workspace.proposeMemory('constraint', memoryTitle.value, memoryContent.value)
+  memoryTitle.value = ''
+  memoryContent.value = ''
+}
+
+const activeRuns = computed(() =>
+  workspace.agentTasks.flatMap((bundle) => bundle.runs).filter((run) => run.status === 'running'),
+)
+const waitingRuns = computed(() =>
+  workspace.agentTasks
+    .flatMap((bundle) => bundle.runs)
+    .filter((run) => run.status === 'queued' || run.status === 'blocked'),
+)
+const failedRuns = computed(() =>
+  workspace.agentTasks
+    .flatMap((bundle) => bundle.runs)
+    .filter((run) => run.status === 'failed' || run.status === 'unavailable'),
+)
+
 function itemTitle(item: ConversationItem): string {
   switch (item.type) {
     case 'agentMessage':
@@ -175,10 +239,18 @@ function backendOpen(path: string) {
       <div class="brand">
         <span class="brand-mark">C</span>
         <div>
-          <strong>Linux Codex Desktop</strong>
+          <strong>Agent Workspace</strong>
           <span>{{ workspace.activeProject?.path ?? 'Choose a local project' }}</span>
         </div>
       </div>
+      <nav v-if="connected && !needsLogin" class="view-switcher">
+        <button type="button" :class="{ active: currentView === 'chat' }" @click="currentView = 'chat'">
+          Workspace
+        </button>
+        <button type="button" :class="{ active: currentView === 'agents' }" @click="openMissionControl">
+          Mission Control
+        </button>
+      </nav>
       <div class="header-actions">
         <button
           v-if="usageLabel"
@@ -249,7 +321,7 @@ function backendOpen(path: string) {
       <p v-if="workspace.error" class="inline-error">{{ workspace.error }}</p>
     </section>
 
-    <section v-else class="workspace">
+    <section v-else-if="currentView === 'chat'" class="workspace">
       <aside class="sidebar">
         <div class="sidebar-heading">
           <span>Projects</span>
@@ -475,6 +547,209 @@ function backendOpen(path: string) {
       </aside>
     </section>
 
+    <section v-else class="mission-control">
+      <header class="mission-header">
+        <div>
+          <p class="eyebrow">Provider-independent orchestration</p>
+          <h1>Agent Mission Control</h1>
+          <span>Plan, implement, review, and verify across installed coding agents.</span>
+        </div>
+        <button class="secondary-button" type="button" @click="workspace.loadAgentWorkspace">
+          Refresh
+        </button>
+      </header>
+
+      <div class="mission-stats">
+        <article><span>Active agents</span><strong>{{ activeRuns.length }}</strong></article>
+        <article><span>Waiting</span><strong>{{ waitingRuns.length }}</strong></article>
+        <article><span>Failed / unavailable</span><strong>{{ failedRuns.length }}</strong></article>
+        <article><span>Tasks</span><strong>{{ workspace.agentTasks.length }}</strong></article>
+      </div>
+
+      <div class="mission-layout">
+        <section class="mission-main">
+          <div class="provider-strip">
+            <article
+              v-for="provider in workspace.agentProviders"
+              :key="provider.id"
+              :class="{ unavailable: !provider.runnable }"
+            >
+              <span class="provider-mark">{{ provider.name.slice(0, 1) }}</span>
+              <div>
+                <strong>{{ provider.name }}</strong>
+                <small>{{
+                  !provider.installed
+                    ? 'Not installed'
+                    : provider.runnable
+                      ? provider.version || 'Available'
+                      : 'Detected · adapter pending'
+                }}</small>
+              </div>
+              <i :data-ready="provider.runnable"></i>
+            </article>
+          </div>
+
+          <div class="agent-table">
+            <header>
+              <span>Agent / role</span><span>Provider</span><span>Task</span><span>Status</span>
+            </header>
+            <template v-for="bundle in workspace.agentTasks" :key="bundle.task.id">
+              <article
+                v-for="run in bundle.runs"
+                :key="run.id"
+                :class="{ clickable: !!run.threadId }"
+                @click="openRunThread(run.threadId)"
+              >
+                <div><strong>{{ run.role }}</strong><small>{{ run.summary || 'Waiting for activity' }}</small></div>
+                <span>{{ workspace.agentProviders.find((provider) => provider.id === run.providerId)?.name || run.providerId }}</span>
+                <div><strong>{{ bundle.task.title }}</strong><small>{{ bundle.task.mode }}</small></div>
+                <div class="run-status" :data-status="run.status">
+                  <span>{{ run.status }}</span>
+                  <progress :value="run.progress" max="100"></progress>
+                </div>
+              </article>
+            </template>
+            <div v-if="!workspace.agentTasks.length" class="mission-empty">
+              No agent tasks yet. Create the first workflow on the right.
+            </div>
+          </div>
+
+          <div class="mission-inspectors">
+            <article>
+              <h3>Preflight</h3>
+              <div v-for="check in workspace.preflight" :key="check.id">
+                <i :data-status="check.status"></i>
+                <span><strong>{{ check.label }}</strong><small>{{ check.detail }}</small></span>
+              </div>
+            </article>
+            <article>
+              <h3>Context Inspector</h3>
+              <div v-for="entry in workspace.contextEntries" :key="entry.path">
+                <i :data-status="entry.kind === 'included' ? 'passed' : 'warning'"></i>
+                <span><strong>{{ entry.path }}</strong><small>{{ entry.reason }} · ~{{ entry.estimatedTokens.toLocaleString() }} tokens</small></span>
+              </div>
+            </article>
+            <article class="memory-inspector">
+              <h3>Living Project Memory</h3>
+              <div v-for="memory in workspace.projectMemory" :key="memory.id">
+                <i data-status="warning"></i>
+                <span><strong>{{ memory.title }}</strong><small>{{ memory.status }} · {{ memory.content }}</small></span>
+                <span v-if="memory.status === 'proposed'" class="memory-actions">
+                  <button type="button" @click="workspace.reviewMemory(memory.id, 'rejected')">×</button>
+                  <button type="button" @click="workspace.reviewMemory(memory.id, 'approved')">✓</button>
+                </span>
+              </div>
+              <input v-model="memoryTitle" type="text" placeholder="Constraint title" />
+              <textarea v-model="memoryContent" rows="2" placeholder="Propose project knowledge…" />
+              <button type="button" :disabled="!memoryTitle.trim() || !memoryContent.trim()" @click="proposeMemory">
+                Propose memory
+              </button>
+            </article>
+          </div>
+
+          <div class="task-capsules">
+            <article v-for="bundle in workspace.agentTasks" :key="bundle.task.id">
+              <header>
+                <div>
+                  <span>{{ bundle.task.mode }} workflow</span>
+                  <h3>{{ bundle.task.title }}</h3>
+                </div>
+                <strong :data-status="bundle.task.status">{{ bundle.task.status }}</strong>
+              </header>
+              <p>{{ bundle.task.prompt }}</p>
+              <div class="artifact-row">
+                <span
+                  v-for="artifact in bundle.artifacts"
+                  :key="artifact.id"
+                  :title="artifact.content"
+                >{{ artifact.type }} · {{ artifact.status }}</span>
+                <em v-if="!bundle.artifacts.length">No artifacts yet</em>
+              </div>
+              <footer>
+                <button
+                  v-if="bundle.task.status === 'waiting-approval'"
+                  class="approve-stage"
+                  type="button"
+                  @click="workspace.approveTaskStage(bundle.task.id)"
+                >
+                  Approve next stage
+                </button>
+                <button type="button" @click="workspace.createTaskSnapshot(bundle.task.id)">Snapshot</button>
+                <button type="button" @click="workspace.createTaskWorktree(bundle.task.id)">Isolated worktree</button>
+                <button type="button" @click="workspace.verifyTask(bundle.task.id)">Run verification</button>
+              </footer>
+            </article>
+          </div>
+        </section>
+
+        <aside class="task-builder">
+          <p class="eyebrow">New workflow</p>
+          <h2>Delegate a task</h2>
+          <label>
+            <span>Project</span>
+            <strong>{{ workspace.activeProject?.name || 'Select a project in Workspace' }}</strong>
+          </label>
+          <label>
+            <span>Task title</span>
+            <input v-model="taskTitle" type="text" placeholder="Optional short title" />
+          </label>
+          <label>
+            <span>Objective</span>
+            <textarea v-model="taskPrompt" rows="7" placeholder="Describe the outcome, constraints, and verification…" />
+          </label>
+          <div>
+            <span class="builder-label">Workflow</span>
+            <div class="segmented-control builder-segments">
+              <button type="button" :class="{ active: taskWorkflow === 'delivery' }" @click="taskWorkflow = 'delivery'">Delivery pipeline</button>
+              <button type="button" :class="{ active: taskWorkflow === 'parallel' }" @click="taskWorkflow = 'parallel'">Parallel jury</button>
+            </div>
+          </div>
+          <div>
+            <span class="builder-label">Agent roles</span>
+            <div class="role-grid">
+              <button
+                v-for="role in ['planner', 'implementer', 'reviewer', 'security', 'browser-qa']"
+                :key="role"
+                type="button"
+                :class="{ active: selectedRoles.includes(role) }"
+                @click="toggleRole(role)"
+              >
+                {{ role }}
+              </button>
+            </div>
+            <div class="role-assignments">
+              <label v-for="role in selectedRoles" :key="role">
+                <span>{{ role }}</span>
+                <select v-model="roleProviders[role]">
+                  <option value="">Smart Router</option>
+                  <option
+                    v-for="provider in workspace.agentProviders"
+                    :key="provider.id"
+                    :value="provider.id"
+                    :disabled="!provider.runnable"
+                  >
+                    {{ provider.name }}{{ provider.runnable ? '' : ` · ${provider.status}` }}
+                  </option>
+                </select>
+              </label>
+            </div>
+          </div>
+          <div class="router-note">
+            <strong>Smart Router</strong>
+            <p>Each role is assigned to the best installed provider. Missing providers are never simulated.</p>
+          </div>
+          <button
+            class="primary-button create-workflow"
+            type="button"
+            :disabled="!workspace.activeProject || !taskPrompt.trim() || !selectedRoles.length"
+            @click="createAgentTask"
+          >
+            Start agent workflow
+          </button>
+        </aside>
+      </div>
+    </section>
+
     <article
       v-if="workspace.planArtifact?.status === 'needs_review'"
       class="plan-review-overlay"
@@ -529,6 +804,21 @@ function backendOpen(path: string) {
         <p v-if="workspace.currentApproval.details.reason" class="approval-reason">
           {{ workspace.currentApproval.details.reason }}
         </p>
+        <div
+          v-if="workspace.currentApproval.details.risk"
+          class="risk-summary"
+          :data-level="workspace.currentApproval.details.risk.level"
+        >
+          <strong>Risk: {{ workspace.currentApproval.details.risk.level }}</strong>
+          <span v-for="reason in workspace.currentApproval.details.risk.reasons" :key="reason">
+            {{ reason }}
+          </span>
+          <small>
+            Reversible: {{ workspace.currentApproval.details.risk.reversible ? 'Yes' : 'No' }}
+            · Outside project:
+            {{ workspace.currentApproval.details.risk.outsideProject ? 'Possible' : 'No' }}
+          </small>
+        </div>
         <pre>{{
           workspace.currentApproval.details.command ||
           workspace.currentApproval.details.grantRoot ||

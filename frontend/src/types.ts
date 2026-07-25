@@ -168,6 +168,12 @@ export interface Approval {
     reason?: string
     grantRoot?: string
     permissions?: Record<string, unknown>
+    risk?: {
+      level: string
+      reasons: string[]
+      reversible: boolean
+      outsideProject: boolean
+    }
   }
 }
 
@@ -198,4 +204,96 @@ export interface ElicitationRequest {
       required?: string[]
     }
   }
+}
+
+export interface AgentProvider {
+  id: string
+  name: string
+  kind: string
+  installed: boolean
+  runnable: boolean
+  executable?: string
+  version?: string
+  status: string
+  capabilities: string[]
+}
+
+export interface AgentTask {
+  id: string
+  projectId: string
+  title: string
+  prompt: string
+  mode: string
+  status: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface AgentRun {
+  id: string
+  taskId: string
+  providerId: string
+  role: string
+  position: number
+  status: string
+  progress: number
+  threadId?: string
+  worktree?: string
+  summary?: string
+  startedAt?: string
+  finishedAt?: string
+}
+
+export interface Artifact {
+  id: string
+  taskId: string
+  runId?: string
+  type: string
+  title: string
+  status: string
+  content: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface AgentTaskBundle {
+  task: AgentTask
+  runs: AgentRun[]
+  artifacts: Artifact[]
+}
+
+export interface AgentTaskRequest {
+  projectId: string
+  title: string
+  prompt: string
+  workflow: 'delivery' | 'parallel'
+  roles: string[]
+  providers: Record<string, string>
+}
+
+export interface PreflightCheck {
+  id: string
+  label: string
+  status: string
+  detail: string
+  blocking: boolean
+}
+
+export interface ContextEntry {
+  path: string
+  kind: string
+  reason: string
+  sensitive: boolean
+  sizeBytes: number
+  estimatedTokens: number
+}
+
+export interface ProjectMemory {
+  id: string
+  projectId: string
+  kind: string
+  title: string
+  content: string
+  status: string
+  createdAt: string
 }

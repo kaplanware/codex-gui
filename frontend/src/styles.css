@@ -88,6 +88,35 @@ pre {
   background: rgba(14, 17, 23, 0.92);
 }
 
+.view-switcher {
+  display: flex;
+  align-self: stretch;
+  gap: 4px;
+}
+
+.view-switcher button {
+  position: relative;
+  border: 0;
+  padding: 0 12px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 0.7rem;
+}
+
+.view-switcher button.active {
+  color: var(--text);
+}
+
+.view-switcher button.active::after {
+  position: absolute;
+  right: 8px;
+  bottom: 0;
+  left: 8px;
+  height: 2px;
+  content: '';
+  background: var(--accent);
+}
+
 .brand,
 .header-actions,
 .account-chip,
@@ -1117,6 +1146,36 @@ pre {
   color: var(--muted);
 }
 
+.risk-summary {
+  display: grid;
+  gap: 5px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 10px;
+  background: var(--panel);
+  font-size: 0.68rem;
+}
+
+.risk-summary[data-level='high'],
+.risk-summary[data-level='critical'] {
+  border-color: rgba(255, 143, 151, 0.5);
+  background: rgba(255, 143, 151, 0.06);
+}
+
+.risk-summary strong {
+  color: var(--warning);
+  text-transform: uppercase;
+}
+
+.risk-summary[data-level='critical'] strong {
+  color: var(--danger);
+}
+
+.risk-summary span,
+.risk-summary small {
+  color: var(--muted);
+}
+
 .approval-actions {
   justify-content: flex-end;
   margin-top: 20px;
@@ -1180,6 +1239,538 @@ pre {
   background: #321b21;
   font-size: 0.72rem;
   box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+}
+
+.mission-control {
+  min-height: 0;
+  overflow: auto;
+  padding: 24px;
+  background:
+    radial-gradient(circle at 80% 0, rgba(124, 228, 189, 0.08), transparent 27rem),
+    var(--bg);
+}
+
+.mission-header,
+.mission-stats,
+.provider-strip,
+.mission-inspectors {
+  display: flex;
+  gap: 12px;
+}
+
+.mission-header {
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+
+.mission-header h1 {
+  margin-bottom: 5px;
+  font-size: 1.3rem;
+}
+
+.mission-header span {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.mission-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-bottom: 14px;
+}
+
+.mission-stats article {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  padding: 13px 15px;
+  background: var(--panel);
+}
+
+.mission-stats span {
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.mission-stats strong {
+  color: var(--accent);
+  font-size: 1.1rem;
+}
+
+.mission-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 330px;
+  gap: 14px;
+  min-height: 0;
+}
+
+.mission-main {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  min-width: 0;
+}
+
+.provider-strip {
+  overflow-x: auto;
+}
+
+.provider-strip article {
+  display: flex;
+  min-width: 175px;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px;
+  background: var(--panel);
+}
+
+.provider-strip article.unavailable {
+  opacity: 0.58;
+}
+
+.provider-mark {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 8px;
+  color: #071610;
+  background: var(--accent);
+  font-weight: 850;
+}
+
+.provider-strip article > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.provider-strip strong,
+.provider-strip small {
+  overflow: hidden;
+  font-size: 0.68rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provider-strip small {
+  color: var(--muted);
+  font-size: 0.6rem;
+}
+
+.provider-strip i {
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.provider-strip i[data-ready='true'] {
+  background: var(--accent);
+}
+
+.agent-table {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+.agent-table > header,
+.agent-table > article {
+  display: grid;
+  grid-template-columns: 1.1fr 0.8fr 1.5fr 0.8fr;
+  gap: 12px;
+  align-items: center;
+}
+
+.agent-table > article.clickable {
+  cursor: pointer;
+}
+
+.agent-table > article.clickable:hover {
+  background: var(--panel-2);
+}
+
+.agent-table > header {
+  padding: 10px 14px;
+  color: var(--muted);
+  background: var(--panel-2);
+  font-size: 0.62rem;
+  text-transform: uppercase;
+}
+
+.agent-table > article {
+  border-top: 1px solid var(--border-soft);
+  padding: 12px 14px;
+  font-size: 0.7rem;
+}
+
+.agent-table article > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.agent-table small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.61rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-status span {
+  color: var(--muted);
+  text-transform: capitalize;
+}
+
+.run-status[data-status='running'] span,
+.run-status[data-status='completed'] span {
+  color: var(--accent);
+}
+
+.run-status[data-status='failed'] span,
+.run-status[data-status='unavailable'] span {
+  color: var(--danger);
+}
+
+.run-status progress {
+  width: 100%;
+  height: 4px;
+  accent-color: var(--accent);
+}
+
+.mission-empty {
+  padding: 28px;
+  color: var(--muted);
+  text-align: center;
+  font-size: 0.72rem;
+}
+
+.mission-inspectors {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.memory-inspector input,
+.memory-inspector textarea {
+  width: 100%;
+  margin-top: 8px;
+  resize: none;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 7px;
+  background: var(--panel-2);
+  font-size: 0.64rem;
+}
+
+.memory-inspector > button {
+  width: 100%;
+  margin-top: 7px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 7px;
+  color: var(--accent);
+  background: var(--panel-2);
+  font-size: 0.63rem;
+}
+
+.memory-actions {
+  display: flex !important;
+  flex-direction: row;
+  gap: 3px !important;
+  margin-left: auto;
+}
+
+.memory-actions button {
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 2px 5px;
+  color: var(--muted);
+  background: var(--panel-2);
+}
+
+.memory-actions button:last-child {
+  color: var(--accent);
+}
+
+.mission-inspectors > article,
+.task-builder {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 15px;
+  background: var(--panel);
+}
+
+.mission-inspectors h3 {
+  margin-bottom: 12px;
+  font-size: 0.76rem;
+}
+
+.mission-inspectors article > div {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 9px;
+}
+
+.mission-inspectors i {
+  width: 7px;
+  height: 7px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.mission-inspectors i[data-status='passed'] {
+  background: var(--accent);
+}
+
+.mission-inspectors i[data-status='warning'] {
+  background: var(--warning);
+}
+
+.mission-inspectors span {
+  display: grid;
+  gap: 2px;
+}
+
+.mission-inspectors strong {
+  font-size: 0.68rem;
+}
+
+.mission-inspectors small {
+  color: var(--muted);
+  font-size: 0.61rem;
+}
+
+.task-builder {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+}
+
+.task-builder h2 {
+  margin-bottom: 0;
+}
+
+.task-builder label {
+  display: grid;
+  gap: 6px;
+}
+
+.task-builder label > span,
+.builder-label {
+  color: var(--muted);
+  font-size: 0.64rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.task-builder label > strong {
+  font-size: 0.72rem;
+}
+
+.task-builder input,
+.task-builder textarea {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 9px;
+  outline: 0;
+  background: var(--panel-2);
+  font-size: 0.72rem;
+}
+
+.task-builder input:focus,
+.task-builder textarea:focus {
+  border-color: rgba(124, 228, 189, 0.55);
+}
+
+.builder-segments {
+  margin-top: 7px;
+}
+
+.builder-segments button {
+  flex: 1;
+}
+
+.role-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.role-grid button {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 9px;
+  color: var(--muted);
+  background: var(--panel-2);
+  font-size: 0.63rem;
+  text-transform: capitalize;
+}
+
+.role-grid button.active {
+  border-color: rgba(124, 228, 189, 0.45);
+  color: var(--accent);
+  background: rgba(124, 228, 189, 0.08);
+}
+
+.role-assignments {
+  display: grid;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.role-assignments label {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.role-assignments label > span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.62rem;
+  text-overflow: ellipsis;
+  text-transform: capitalize;
+}
+
+.role-assignments select {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 6px;
+  color: var(--text);
+  background: var(--panel-2);
+  font-size: 0.63rem;
+}
+
+.router-note {
+  border: 1px solid rgba(124, 228, 189, 0.2);
+  border-radius: 9px;
+  padding: 10px;
+  background: rgba(124, 228, 189, 0.04);
+}
+
+.router-note strong {
+  color: var(--accent);
+  font-size: 0.67rem;
+}
+
+.router-note p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.63rem;
+  line-height: 1.45;
+}
+
+.create-workflow {
+  width: 100%;
+  padding: 10px;
+}
+
+.task-capsules {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.task-capsules > article {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px;
+  background: var(--panel);
+}
+
+.task-capsules header,
+.task-capsules footer,
+.artifact-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.task-capsules header {
+  justify-content: space-between;
+}
+
+.task-capsules header span,
+.task-capsules header > strong,
+.task-capsules p,
+.artifact-row {
+  color: var(--muted);
+  font-size: 0.62rem;
+}
+
+.task-capsules h3 {
+  margin: 3px 0 0;
+  font-size: 0.78rem;
+}
+
+.task-capsules header > strong {
+  color: var(--accent);
+  text-transform: uppercase;
+}
+
+.task-capsules p {
+  display: -webkit-box;
+  margin: 12px 0;
+  overflow: hidden;
+  line-height: 1.5;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.artifact-row {
+  flex-wrap: wrap;
+  min-height: 25px;
+}
+
+.artifact-row span {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 7px;
+  background: var(--panel-2);
+}
+
+.artifact-row em {
+  font-style: normal;
+}
+
+.task-capsules footer {
+  margin-top: 12px;
+}
+
+.task-capsules footer button {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 6px 8px;
+  color: var(--muted);
+  background: var(--panel-2);
+  font-size: 0.61rem;
+}
+
+.task-capsules footer button:hover {
+  color: var(--text);
+  border-color: #465264;
+}
+
+.task-capsules footer .approve-stage {
+  border-color: rgba(124, 228, 189, 0.45);
+  color: #071610;
+  background: var(--accent);
 }
 
 @media (max-width: 980px) {
