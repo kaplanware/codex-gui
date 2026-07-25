@@ -14,6 +14,16 @@ declare global {
           ListModels(): Promise<unknown>
           ListAgentProviders(): Promise<unknown>
           BeginProviderLogin(providerId: string): Promise<unknown>
+          StartProviderConsole(
+            providerId: string,
+            purpose: string,
+            projectId: string,
+            cols: number,
+            rows: number,
+          ): Promise<unknown>
+          WriteProviderConsole(sessionId: string, data: string): Promise<void>
+          ResizeProviderConsole(sessionId: string, cols: number, rows: number): Promise<void>
+          StopProviderConsole(sessionId: string): Promise<void>
           LogoutProvider(providerId: string): Promise<void>
           ListAgentTasks(projectId: string): Promise<unknown>
           CreateAgentTask(request: unknown): Promise<unknown>
@@ -21,14 +31,24 @@ declare global {
           InspectProjectContext(projectId: string): Promise<unknown>
           AssessCommandRisk(projectId: string, command: string): Promise<unknown>
           ListProjectMemory(projectId: string): Promise<unknown>
-          ProposeProjectMemory(projectId: string, kind: string, title: string, content: string): Promise<unknown>
+          ProposeProjectMemory(
+            projectId: string,
+            kind: string,
+            title: string,
+            content: string,
+          ): Promise<unknown>
           ReviewProjectMemory(id: string, decision: string): Promise<void>
           CreateTaskSnapshot(taskId: string): Promise<unknown>
           CreateTaskWorktree(taskId: string): Promise<unknown>
           RunTaskVerification(taskId: string): Promise<unknown>
           ApproveAgentTaskStage(taskId: string): Promise<void>
           ListCoordinationMessages(taskId: string): Promise<unknown>
-          PostCoordinationMessage(taskId: string, runId: string, kind: string, message: string): Promise<unknown>
+          PostCoordinationMessage(
+            taskId: string,
+            runId: string,
+            kind: string,
+            message: string,
+          ): Promise<unknown>
           LoginWithChatGPT(): Promise<unknown>
           LoginWithDeviceCode(): Promise<unknown>
           Logout(): Promise<void>

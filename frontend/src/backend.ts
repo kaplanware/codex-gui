@@ -13,6 +13,7 @@ import type {
   ProjectMemory,
   PreflightCheck,
   ProviderAuthStart,
+  ProviderConsoleSession,
   RateLimits,
   StartupStatus,
   Thread,
@@ -38,9 +39,27 @@ export const backend = {
   listAgentProviders: () => app().ListAgentProviders() as Promise<AgentProvider[]>,
   beginProviderLogin: (providerId: string) =>
     app().BeginProviderLogin(providerId) as Promise<ProviderAuthStart>,
+  startProviderConsole: (
+    providerId: string,
+    purpose: 'login' | 'manage' | 'shell',
+    projectId: string,
+    cols: number,
+    rows: number,
+  ) =>
+    app().StartProviderConsole(
+      providerId,
+      purpose,
+      projectId,
+      cols,
+      rows,
+    ) as Promise<ProviderConsoleSession>,
+  writeProviderConsole: (sessionId: string, data: string) =>
+    app().WriteProviderConsole(sessionId, data),
+  resizeProviderConsole: (sessionId: string, cols: number, rows: number) =>
+    app().ResizeProviderConsole(sessionId, cols, rows),
+  stopProviderConsole: (sessionId: string) => app().StopProviderConsole(sessionId),
   logoutProvider: (providerId: string) => app().LogoutProvider(providerId),
-  listAgentTasks: (projectId = '') =>
-    app().ListAgentTasks(projectId) as Promise<AgentTaskBundle[]>,
+  listAgentTasks: (projectId = '') => app().ListAgentTasks(projectId) as Promise<AgentTaskBundle[]>,
   createAgentTask: (request: AgentTaskRequest) =>
     app().CreateAgentTask(request) as Promise<AgentTaskBundle>,
   preflightProject: (projectId: string) =>
@@ -54,7 +73,12 @@ export const backend = {
   listCoordinationMessages: (taskId: string) =>
     app().ListCoordinationMessages(taskId) as Promise<CoordinationMessage[]>,
   postCoordinationMessage: (taskId: string, message: string) =>
-    app().PostCoordinationMessage(taskId, '', 'human-guidance', message) as Promise<CoordinationMessage>,
+    app().PostCoordinationMessage(
+      taskId,
+      '',
+      'human-guidance',
+      message,
+    ) as Promise<CoordinationMessage>,
   listProjectMemory: (projectId: string) =>
     app().ListProjectMemory(projectId) as Promise<ProjectMemory[]>,
   proposeProjectMemory: (projectId: string, kind: string, title: string, content: string) =>

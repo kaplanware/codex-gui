@@ -1246,8 +1246,7 @@ pre {
   overflow: auto;
   padding: 24px;
   background:
-    radial-gradient(circle at 80% 0, rgba(124, 228, 189, 0.08), transparent 27rem),
-    var(--bg);
+    radial-gradient(circle at 80% 0, rgba(124, 228, 189, 0.08), transparent 27rem), var(--bg);
 }
 
 .mission-header,
@@ -1916,6 +1915,77 @@ pre {
   border-radius: 9px;
   padding: 9px;
   background: var(--panel);
+}
+
+.provider-console-overlay {
+  position: fixed;
+  z-index: 80;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  background: rgb(3 7 12 / 76%);
+  backdrop-filter: blur(8px);
+}
+
+.provider-console-panel {
+  display: grid;
+  grid-template-rows: auto minmax(360px, 1fr) auto;
+  width: min(1040px, 94vw);
+  height: min(720px, 88vh);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: #0b0f14;
+  box-shadow: 0 28px 90px rgb(0 0 0 / 55%);
+}
+
+.provider-console-panel > header,
+.provider-console-panel > footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 14px 18px;
+  background: var(--panel);
+}
+
+.provider-console-panel > header {
+  border-bottom: 1px solid var(--border);
+}
+
+.provider-console-panel > header h2 {
+  margin: 2px 0;
+}
+
+.provider-console-panel > header span,
+.provider-console-panel > footer span {
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.provider-console-panel > header > button {
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+  font-size: 1.35rem;
+  cursor: pointer;
+}
+
+.provider-console-panel > footer {
+  border-top: 1px solid var(--border);
+}
+
+.provider-terminal {
+  min-width: 0;
+  min-height: 0;
+  padding: 12px;
+  background: #0b0f14;
+}
+
+.provider-terminal .xterm,
+.provider-terminal .xterm-viewport {
+  height: 100%;
 }
 
 @media (max-width: 980px) {

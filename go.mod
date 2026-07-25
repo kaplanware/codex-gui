@@ -4,7 +4,10 @@ go 1.25.0
 
 require github.com/wailsapp/wails/v2 v2.13.0
 
-require modernc.org/sqlite v1.39.1
+require (
+	github.com/creack/pty v1.1.24
+	modernc.org/sqlite v1.39.1
+)
 
 require (
 	git.sr.ht/~jackmordaunt/go-toast/v2 v2.0.3 // indirect

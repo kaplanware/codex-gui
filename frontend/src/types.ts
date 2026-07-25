@@ -116,6 +116,21 @@ export interface LoginStart {
   userCode?: string
 }
 
+export interface ProviderConsoleSession {
+  id: string
+  providerId: string
+  status: string
+  startedAt: string
+}
+
+export interface ProviderConsoleEvent {
+  sessionId: string
+  providerId: string
+  data?: string
+  exitCode?: number
+  error?: string
+}
+
 export interface Project {
   id: string
   name: string

@@ -22,6 +22,7 @@ import (
 	"github.com/kaplanware/codex-gui/internal/codex"
 	"github.com/kaplanware/codex-gui/internal/database"
 	"github.com/kaplanware/codex-gui/internal/projects"
+	"github.com/kaplanware/codex-gui/internal/terminal"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -33,6 +34,7 @@ type App struct {
 	databaseErr    error
 	logger         *slog.Logger
 	agentRegistry  *agents.Registry
+	terminals      *terminal.Manager
 	runMu          sync.Mutex
 	turnRuns       map[string]runReference
 	coordinationMu sync.Mutex
@@ -56,6 +58,11 @@ func NewApp() *App {
 	if store != nil {
 		app.projects = projects.NewService(store)
 	}
+	app.terminals = terminal.NewManager(func(event terminal.Event) {
+		if app.ctx != nil {
+			runtime.EventsEmit(app.ctx, "provider:console", event)
+		}
+	})
 	app.manager.SetProtocolHandler(app.handleProtocolMessage)
 	return app
 }
@@ -106,6 +113,7 @@ type CoordinationMessage struct {
 }
 
 func (a *App) shutdown(_ context.Context) {
+	a.terminals.StopAll()
 	a.coordinationMu.Lock()
 	for _, cancel := range a.watchers {
 		cancel()
@@ -334,7 +342,7 @@ func (a *App) BeginProviderLogin(providerID string) (ProviderAuthStart, error) {
 			Message: "Complete Codex authentication in the browser.",
 		}, nil
 	}
-	provider, err := a.installedProvider(providerID)
+	_, err := a.installedProvider(providerID)
 	if err != nil {
 		return ProviderAuthStart{}, err
 	}
@@ -342,13 +350,62 @@ func (a *App) BeginProviderLogin(providerID string) (ProviderAuthStart, error) {
 	if args == nil {
 		return ProviderAuthStart{}, errors.New("this provider does not expose a supported interactive login flow")
 	}
-	if err := launchInTerminal(provider.Executable, args...); err != nil {
-		return ProviderAuthStart{}, err
-	}
 	return ProviderAuthStart{
-		ProviderID: providerID, Mode: "terminal",
-		Message: "An interactive provider authentication terminal was opened.",
+		ProviderID: providerID, Mode: "embedded",
+		Message: "Authenticate in the embedded provider console.",
 	}, nil
+}
+
+func (a *App) StartProviderConsole(
+	providerID, purpose, projectID string,
+	cols, rows int,
+) (terminal.SessionInfo, error) {
+	if providerID == "codex" {
+		return terminal.SessionInfo{}, errors.New("Codex authentication uses the browser flow")
+	}
+	provider, err := a.installedProvider(providerID)
+	if err != nil {
+		return terminal.SessionInfo{}, err
+	}
+	var args []string
+	switch purpose {
+	case "", "login":
+		args = providerLoginArgs(providerID)
+		if args == nil {
+			return terminal.SessionInfo{}, errors.New("this provider has no interactive login console")
+		}
+	case "manage", "shell":
+		args = []string{}
+	default:
+		return terminal.SessionInfo{}, errors.New("unsupported provider console purpose")
+	}
+	cwd, err := os.UserHomeDir()
+	if err != nil {
+		cwd = os.TempDir()
+	}
+	if projectID != "" && a.projects != nil {
+		project, projectErr := a.projects.Get(context.Background(), projectID)
+		if projectErr != nil {
+			return terminal.SessionInfo{}, projectErr
+		}
+		cwd = project.CanonicalPath
+	}
+	return a.terminals.Start(
+		context.Background(), providerID, provider.Executable, args, cwd,
+		uint16(max(cols, 0)), uint16(max(rows, 0)),
+	)
+}
+
+func (a *App) WriteProviderConsole(sessionID, data string) error {
+	return a.terminals.Write(sessionID, data)
+}
+
+func (a *App) ResizeProviderConsole(sessionID string, cols, rows int) error {
+	return a.terminals.Resize(sessionID, uint16(max(cols, 0)), uint16(max(rows, 0)))
+}
+
+func (a *App) StopProviderConsole(sessionID string) error {
+	return a.terminals.Stop(sessionID)
 }
 
 func (a *App) LogoutProvider(providerID string) error {
@@ -366,7 +423,7 @@ func (a *App) LogoutProvider(providerID string) error {
 	default:
 		return errors.New("use Manage login to change authentication for this provider")
 	}
-	return launchInTerminal(provider.Executable, args...)
+	return exec.CommandContext(context.Background(), provider.Executable, args...).Run()
 }
 
 func (a *App) providerAuthStatus(provider agents.ProviderStatus) string {
@@ -426,42 +483,6 @@ func providerLoginArgs(providerID string) []string {
 	default:
 		return nil
 	}
-}
-
-func launchInTerminal(executable string, args ...string) error {
-	type terminal struct {
-		name string
-		args func(string, []string) []string
-	}
-	candidates := []terminal{
-		{name: "kitty", args: func(command string, commandArgs []string) []string {
-			return append([]string{"--hold", command}, commandArgs...)
-		}},
-		{name: "konsole", args: func(command string, commandArgs []string) []string {
-			return append([]string{"-e", command}, commandArgs...)
-		}},
-		{name: "gnome-terminal", args: func(command string, commandArgs []string) []string {
-			return append([]string{"--", command}, commandArgs...)
-		}},
-		{name: "foot", args: func(command string, commandArgs []string) []string {
-			return append([]string{"--hold", command}, commandArgs...)
-		}},
-		{name: "xterm", args: func(command string, commandArgs []string) []string {
-			return append([]string{"-hold", "-e", command}, commandArgs...)
-		}},
-	}
-	for _, candidate := range candidates {
-		path, err := exec.LookPath(candidate.name)
-		if err != nil {
-			continue
-		}
-		command := exec.Command(path, candidate.args(executable, args)...)
-		if err := command.Start(); err != nil {
-			continue
-		}
-		return command.Process.Release()
-	}
-	return errors.New("no supported terminal emulator was found")
 }
 
 func (a *App) ListAgentTasks(projectID string) ([]AgentTaskBundle, error) {

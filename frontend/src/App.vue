@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { FitAddon } from '@xterm/addon-fit'
+import { Terminal } from '@xterm/xterm'
+import '@xterm/xterm/css/xterm.css'
 
-import { backend } from './backend'
+import { backend, subscribe } from './backend'
 import { useDiagnosticsStore } from './stores/diagnostics'
 import { useWorkspaceStore } from './stores/workspace'
-import type { AgentProvider, ConversationItem, FileMatch } from './types'
+import type { AgentProvider, ConversationItem, FileMatch, ProviderConsoleEvent } from './types'
 
 const diagnostics = useDiagnosticsStore()
 const workspace = useWorkspaceStore()
@@ -24,10 +27,18 @@ const memoryContent = ref('')
 const coordinationTaskId = ref('')
 const coordinationDraft = ref('')
 const setupProvider = ref<AgentProvider | null>(null)
+const consoleProvider = ref<AgentProvider | null>(null)
+const consoleElement = ref<HTMLElement | null>(null)
+const consoleSessionId = ref('')
+const consoleStatus = ref('Starting…')
 const planFeedback = ref('')
 const userAnswers = ref<Record<string, string[]>>({})
 const elicitationValues = ref<Record<string, unknown>>({})
 let fileSearchTimer: number | undefined
+let providerTerminal: Terminal | null = null
+let terminalFit: FitAddon | null = null
+let consoleResizeObserver: { observe(element: HTMLElement): void; disconnect(): void } | null = null
+let unsubscribeConsole: (() => void) | null = null
 
 const connected = computed(() => diagnostics.status?.state === 'ready')
 const needsLogin = computed(
@@ -44,6 +55,23 @@ const usageLabel = computed(() => {
 })
 
 onMounted(async () => {
+  unsubscribeConsole = subscribe('provider:console', (payload) => {
+    const event = payload as ProviderConsoleEvent
+    if (
+      !consoleSessionId.value &&
+      consoleProvider.value?.id === event.providerId &&
+      event.sessionId
+    ) {
+      consoleSessionId.value = event.sessionId
+    }
+    if (event.sessionId !== consoleSessionId.value) return
+    if (event.data) providerTerminal?.write(event.data)
+    if (event.exitCode !== undefined) {
+      consoleStatus.value = event.exitCode === 0 ? 'Session finished' : `Exited (${event.exitCode})`
+      if (event.error) providerTerminal?.writeln(`\r\n\x1b[31m${event.error}\x1b[0m`)
+      globalThis.setTimeout(() => void workspace.loadAgentWorkspace(), 500)
+    }
+  })
   diagnostics.connectEvents()
   await diagnostics.load()
   if (connected.value) await workspace.initialize()
@@ -51,6 +79,8 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   if (fileSearchTimer) globalThis.clearTimeout(fileSearchTimer)
+  unsubscribeConsole?.()
+  closeProviderConsole()
   diagnostics.disconnectEvents()
   workspace.disconnectEvents()
 })
@@ -196,7 +226,77 @@ async function providerAction(provider: AgentProvider) {
     setupProvider.value = provider
     return
   }
-  await workspace.manageProviderLogin(provider.id)
+  if (provider.id === 'codex') {
+    await workspace.manageProviderLogin(provider.id)
+    return
+  }
+  await openProviderConsole(provider)
+}
+
+async function openProviderConsole(provider: AgentProvider) {
+  consoleProvider.value = provider
+  consoleStatus.value = 'Starting…'
+  await nextTick()
+  if (!consoleElement.value) return
+  providerTerminal = new Terminal({
+    cursorBlink: true,
+    convertEol: true,
+    fontFamily: "'JetBrains Mono', 'Cascadia Code', monospace",
+    fontSize: 13,
+    theme: {
+      background: '#0b0f14',
+      foreground: '#dce4ed',
+      cursor: '#72e6bd',
+      selectionBackground: '#285747',
+    },
+  })
+  terminalFit = new FitAddon()
+  providerTerminal.loadAddon(terminalFit)
+  providerTerminal.open(consoleElement.value)
+  terminalFit.fit()
+  try {
+    const session = await backend.startProviderConsole(
+      provider.id,
+      provider.authStatus === 'authenticated' ? 'manage' : 'login',
+      '',
+      providerTerminal.cols,
+      providerTerminal.rows,
+    )
+    consoleSessionId.value = session.id
+    consoleStatus.value = 'Interactive session'
+    providerTerminal.onData((data) => {
+      if (consoleSessionId.value) void backend.writeProviderConsole(consoleSessionId.value, data)
+    })
+    consoleResizeObserver = new globalThis.ResizeObserver(() => {
+      terminalFit?.fit()
+      if (consoleSessionId.value && providerTerminal) {
+        void backend.resizeProviderConsole(
+          consoleSessionId.value,
+          providerTerminal.cols,
+          providerTerminal.rows,
+        )
+      }
+    })
+    consoleResizeObserver.observe(consoleElement.value)
+    providerTerminal.focus()
+  } catch (error) {
+    consoleStatus.value = 'Could not start'
+    providerTerminal.writeln(
+      `\x1b[31m${error instanceof Error ? error.message : String(error)}\x1b[0m`,
+    )
+  }
+}
+
+function closeProviderConsole() {
+  const sessionId = consoleSessionId.value
+  consoleSessionId.value = ''
+  if (sessionId) void backend.stopProviderConsole(sessionId).catch(() => undefined)
+  consoleResizeObserver?.disconnect()
+  consoleResizeObserver = null
+  providerTerminal?.dispose()
+  providerTerminal = null
+  terminalFit = null
+  consoleProvider.value = null
 }
 
 function providerInstallCommand(providerId: string) {
@@ -286,25 +386,30 @@ function backendOpen(path: string) {
         </div>
       </div>
       <nav v-if="connected && !needsLogin" class="view-switcher">
-        <button type="button" :class="{ active: currentView === 'chat' }" @click="currentView = 'chat'">
+        <button
+          type="button"
+          :class="{ active: currentView === 'chat' }"
+          @click="currentView = 'chat'"
+        >
           Workspace
         </button>
-        <button type="button" :class="{ active: currentView === 'agents' }" @click="openMissionControl">
+        <button
+          type="button"
+          :class="{ active: currentView === 'agents' }"
+          @click="openMissionControl"
+        >
           Mission Control
         </button>
       </nav>
       <div class="header-actions">
-        <button
-          v-if="usageLabel"
-          class="usage-chip"
-          type="button"
-          @click="showUsage = !showUsage"
-        >
+        <button v-if="usageLabel" class="usage-chip" type="button" @click="showUsage = !showUsage">
           {{ usageLabel }}
         </button>
         <div v-if="showUsage" class="usage-popover">
           <div class="popover-heading">
-            <div><small>Usage limits</small><strong>{{ workspace.rateLimits?.limitName || 'Codex' }}</strong></div>
+            <div>
+              <small>Usage limits</small><strong>{{ workspace.rateLimits?.limitName || 'Codex' }}</strong>
+            </div>
             <button type="button" @click="showUsage = false">×</button>
           </div>
           <div v-if="workspace.rateLimits?.primary" class="usage-window">
@@ -317,10 +422,16 @@ function backendOpen(path: string) {
             <span>Long-term window</span>
             <strong>{{ Math.round(workspace.rateLimits.secondary.remainingPercent) }}% left</strong>
             <progress :value="workspace.rateLimits.secondary.remainingPercent" max="100"></progress>
-            <small>Automatically resets: {{ formatReset(workspace.rateLimits.secondary.resetsAt) }}</small>
+            <small>Automatically resets:
+              {{ formatReset(workspace.rateLimits.secondary.resetsAt) }}</small>
           </div>
-          <p>Limits are reset by the provider automatically. This client cannot manually reset provider quota.</p>
-          <button class="secondary-button" type="button" @click="workspace.loadRateLimits">Refresh usage</button>
+          <p>
+            Limits are reset by the provider automatically. This client cannot manually reset
+            provider quota.
+          </p>
+          <button class="secondary-button" type="button" @click="workspace.loadRateLimits">
+            Refresh usage
+          </button>
         </div>
         <button class="connection-chip" type="button" @click="showDiagnostics = !showDiagnostics">
           <span class="status-dot" :data-ready="connected"></span>
@@ -517,7 +628,11 @@ function backendOpen(path: string) {
             </div>
             <div class="turn-controls">
               <div class="model-control">
-                <button class="control-trigger" type="button" @click="showModelMenu = !showModelMenu">
+                <button
+                  class="control-trigger"
+                  type="button"
+                  @click="showModelMenu = !showModelMenu"
+                >
                   <span>Model</span><strong>{{ workspace.currentModel?.displayName || 'Default' }}</strong><b>⌄</b>
                 </button>
                 <div v-if="showModelMenu" class="model-menu">
@@ -526,7 +641,10 @@ function backendOpen(path: string) {
                     :key="model.id"
                     type="button"
                     :class="{ active: model.id === workspace.selectedModel }"
-                    @click="workspace.setModel(model.id); showModelMenu = false"
+                    @click="
+                      workspace.setModel(model.id);
+                      showModelMenu = false
+                    "
                   >
                     <strong>{{ model.displayName }}</strong><small>{{ model.description }}</small>
                   </button>
@@ -544,8 +662,20 @@ function backendOpen(path: string) {
                 </button>
               </div>
               <div class="segmented-control mode-control" aria-label="Workflow mode">
-                <button type="button" :class="{ active: workspace.selectedMode === 'default' }" @click="workspace.selectedMode = 'default'">Fast</button>
-                <button type="button" :class="{ active: workspace.selectedMode === 'plan' }" @click="workspace.selectedMode = 'plan'">Plan</button>
+                <button
+                  type="button"
+                  :class="{ active: workspace.selectedMode === 'default' }"
+                  @click="workspace.selectedMode = 'default'"
+                >
+                  Fast
+                </button>
+                <button
+                  type="button"
+                  :class="{ active: workspace.selectedMode === 'plan' }"
+                  @click="workspace.selectedMode = 'plan'"
+                >
+                  Plan
+                </button>
               </div>
             </div>
             <div class="composer-footer">
@@ -602,10 +732,18 @@ function backendOpen(path: string) {
       </header>
 
       <div class="mission-stats">
-        <article><span>Active agents</span><strong>{{ activeRuns.length }}</strong></article>
-        <article><span>Waiting</span><strong>{{ waitingRuns.length }}</strong></article>
-        <article><span>Failed / unavailable</span><strong>{{ failedRuns.length }}</strong></article>
-        <article><span>Tasks</span><strong>{{ workspace.agentTasks.length }}</strong></article>
+        <article>
+          <span>Active agents</span><strong>{{ activeRuns.length }}</strong>
+        </article>
+        <article>
+          <span>Waiting</span><strong>{{ waitingRuns.length }}</strong>
+        </article>
+        <article>
+          <span>Failed / unavailable</span><strong>{{ failedRuns.length }}</strong>
+        </article>
+        <article>
+          <span>Tasks</span><strong>{{ workspace.agentTasks.length }}</strong>
+        </article>
       </div>
 
       <div class="mission-layout">
@@ -657,9 +795,16 @@ function backendOpen(path: string) {
                 :class="{ clickable: !!run.threadId }"
                 @click="openRunThread(run.threadId)"
               >
-                <div><strong>{{ run.role }}</strong><small>{{ run.summary || 'Waiting for activity' }}</small></div>
-                <span>{{ workspace.agentProviders.find((provider) => provider.id === run.providerId)?.name || run.providerId }}</span>
-                <div><strong>{{ bundle.task.title }}</strong><small>{{ bundle.task.mode }}</small></div>
+                <div>
+                  <strong>{{ run.role }}</strong><small>{{ run.summary || 'Waiting for activity' }}</small>
+                </div>
+                <span>{{
+                  workspace.agentProviders.find((provider) => provider.id === run.providerId)
+                    ?.name || run.providerId
+                }}</span>
+                <div>
+                  <strong>{{ bundle.task.title }}</strong><small>{{ bundle.task.mode }}</small>
+                </div>
                 <div class="run-status" :data-status="run.status">
                   <span>{{ run.status }}</span>
                   <progress :value="run.progress" max="100"></progress>
@@ -683,7 +828,10 @@ function backendOpen(path: string) {
               <h3>Context Inspector</h3>
               <div v-for="entry in workspace.contextEntries" :key="entry.path">
                 <i :data-status="entry.kind === 'included' ? 'passed' : 'warning'"></i>
-                <span><strong>{{ entry.path }}</strong><small>{{ entry.reason }} · ~{{ entry.estimatedTokens.toLocaleString() }} tokens</small></span>
+                <span><strong>{{ entry.path }}</strong><small>{{ entry.reason }} · ~{{
+                  entry.estimatedTokens.toLocaleString()
+                }}
+                  tokens</small></span>
               </div>
             </article>
             <article class="memory-inspector">
@@ -692,13 +840,21 @@ function backendOpen(path: string) {
                 <i data-status="warning"></i>
                 <span><strong>{{ memory.title }}</strong><small>{{ memory.status }} · {{ memory.content }}</small></span>
                 <span v-if="memory.status === 'proposed'" class="memory-actions">
-                  <button type="button" @click="workspace.reviewMemory(memory.id, 'rejected')">×</button>
-                  <button type="button" @click="workspace.reviewMemory(memory.id, 'approved')">✓</button>
+                  <button type="button" @click="workspace.reviewMemory(memory.id, 'rejected')">
+                    ×
+                  </button>
+                  <button type="button" @click="workspace.reviewMemory(memory.id, 'approved')">
+                    ✓
+                  </button>
                 </span>
               </div>
               <input v-model="memoryTitle" type="text" placeholder="Constraint title" />
               <textarea v-model="memoryContent" rows="2" placeholder="Propose project knowledge…" />
-              <button type="button" :disabled="!memoryTitle.trim() || !memoryContent.trim()" @click="proposeMemory">
+              <button
+                type="button"
+                :disabled="!memoryTitle.trim() || !memoryContent.trim()"
+                @click="proposeMemory"
+              >
                 Propose memory
               </button>
             </article>
@@ -731,9 +887,15 @@ function backendOpen(path: string) {
                 >
                   Approve next stage
                 </button>
-                <button type="button" @click="workspace.createTaskSnapshot(bundle.task.id)">Snapshot</button>
-                <button type="button" @click="workspace.createTaskWorktree(bundle.task.id)">Isolated worktree</button>
-                <button type="button" @click="workspace.verifyTask(bundle.task.id)">Run verification</button>
+                <button type="button" @click="workspace.createTaskSnapshot(bundle.task.id)">
+                  Snapshot
+                </button>
+                <button type="button" @click="workspace.createTaskWorktree(bundle.task.id)">
+                  Isolated worktree
+                </button>
+                <button type="button" @click="workspace.verifyTask(bundle.task.id)">
+                  Run verification
+                </button>
                 <button type="button" @click="openCoordination(bundle.task.id)">Shared task</button>
               </footer>
             </article>
@@ -753,13 +915,29 @@ function backendOpen(path: string) {
           </label>
           <label>
             <span>Objective</span>
-            <textarea v-model="taskPrompt" rows="7" placeholder="Describe the outcome, constraints, and verification…" />
+            <textarea
+              v-model="taskPrompt"
+              rows="7"
+              placeholder="Describe the outcome, constraints, and verification…"
+            />
           </label>
           <div>
             <span class="builder-label">Workflow</span>
             <div class="segmented-control builder-segments">
-              <button type="button" :class="{ active: taskWorkflow === 'delivery' }" @click="taskWorkflow = 'delivery'">Delivery pipeline</button>
-              <button type="button" :class="{ active: taskWorkflow === 'parallel' }" @click="taskWorkflow = 'parallel'">Parallel jury</button>
+              <button
+                type="button"
+                :class="{ active: taskWorkflow === 'delivery' }"
+                @click="taskWorkflow = 'delivery'"
+              >
+                Delivery pipeline
+              </button>
+              <button
+                type="button"
+                :class="{ active: taskWorkflow === 'parallel' }"
+                @click="taskWorkflow = 'parallel'"
+              >
+                Parallel jury
+              </button>
             </div>
           </div>
           <div>
@@ -794,7 +972,10 @@ function backendOpen(path: string) {
           </div>
           <div class="router-note">
             <strong>Smart Router</strong>
-            <p>Each role is assigned to the best installed provider. Missing providers are never simulated.</p>
+            <p>
+              Each role is assigned to the best installed provider. Missing providers are never
+              simulated.
+            </p>
           </div>
           <button
             class="primary-button create-workflow"
@@ -817,17 +998,45 @@ function backendOpen(path: string) {
           authentication flow.
         </p>
         <pre>{{ providerInstallCommand(setupProvider.id) }}</pre>
-        <small>After installation, return to Mission Control and press Refresh. The button will change from Set up to Login.</small>
+        <small>After installation, return to Mission Control and press Refresh. The button will change
+          from Set up to Login.</small>
         <div class="approval-actions">
-          <button class="secondary-button" type="button" @click="setupProvider = null">Close</button>
+          <button class="secondary-button" type="button" @click="setupProvider = null">
+            Close
+          </button>
           <button
             class="primary-button"
             type="button"
-            @click="setupProvider = null; workspace.loadAgentWorkspace()"
+            @click="
+              setupProvider = null;
+              workspace.loadAgentWorkspace()
+            "
           >
             Refresh detection
           </button>
         </div>
+      </section>
+    </article>
+
+    <article v-if="consoleProvider" class="provider-console-overlay">
+      <section class="provider-console-panel">
+        <header>
+          <div>
+            <p class="eyebrow">Embedded provider console</p>
+            <h2>{{ consoleProvider.name }}</h2>
+            <span>{{ consoleStatus }} · runs locally in your user environment</span>
+          </div>
+          <button type="button" aria-label="Close provider console" @click="closeProviderConsole">
+            ×
+          </button>
+        </header>
+        <div ref="consoleElement" class="provider-terminal"></div>
+        <footer>
+          <span>Interactive input, browser links, and CLI output stay inside Agent Workspace.</span>
+          <button class="secondary-button" type="button" @click="closeProviderConsole">
+            Close console
+          </button>
+        </footer>
       </section>
     </article>
 
@@ -852,26 +1061,37 @@ function backendOpen(path: string) {
             :key="message.id"
             :data-role="message.role"
           >
-            <header><strong>{{ message.role || 'agent' }}</strong><span>{{ message.kind }}</span><time>{{ new Date(message.createdAt).toLocaleTimeString() }}</time></header>
+            <header>
+              <strong>{{ message.role || 'agent' }}</strong><span>{{ message.kind }}</span><time>{{ new Date(message.createdAt).toLocaleTimeString() }}</time>
+            </header>
             <p>{{ message.message }}</p>
           </article>
-          <div v-if="!(workspace.coordinationByTask[coordinationTaskId] ?? []).length" class="mission-empty">
+          <div
+            v-if="!(workspace.coordinationByTask[coordinationTaskId] ?? []).length"
+            class="mission-empty"
+          >
             No messages yet. Agents append findings, questions, and handoffs here.
           </div>
         </div>
         <footer>
-          <textarea v-model="coordinationDraft" rows="3" placeholder="Broadcast guidance to every active agent on this task…" />
-          <button class="primary-button" type="button" :disabled="!coordinationDraft.trim()" @click="postCoordination">
+          <textarea
+            v-model="coordinationDraft"
+            rows="3"
+            placeholder="Broadcast guidance to every active agent on this task…"
+          />
+          <button
+            class="primary-button"
+            type="button"
+            :disabled="!coordinationDraft.trim()"
+            @click="postCoordination"
+          >
             Broadcast
           </button>
         </footer>
       </section>
     </article>
 
-    <article
-      v-if="workspace.planArtifact?.status === 'needs_review'"
-      class="plan-review-overlay"
-    >
+    <article v-if="workspace.planArtifact?.status === 'needs_review'" class="plan-review-overlay">
       <section class="plan-review">
         <header>
           <div>
@@ -891,17 +1111,31 @@ function backendOpen(path: string) {
               <li>Implementation</li>
               <li>Verification</li>
             </ol>
-            <small>Approval switches the next turn to implementation mode. Revision keeps Codex in strict read-only planning mode.</small>
+            <small>Approval switches the next turn to implementation mode. Revision keeps Codex in
+              strict read-only planning mode.</small>
           </aside>
           <div class="plan-document">
             <pre>{{ workspace.planArtifact.text }}</pre>
           </div>
         </div>
         <footer>
-          <textarea v-model="planFeedback" rows="3" placeholder="Request a specific revision…"></textarea>
+          <textarea
+            v-model="planFeedback"
+            rows="3"
+            placeholder="Request a specific revision…"
+          ></textarea>
           <div>
-            <button class="secondary-button" type="button" :disabled="!planFeedback.trim()" @click="requestPlanRevision">Revise plan</button>
-            <button class="primary-button" type="button" @click="workspace.approvePlan">Approve & implement</button>
+            <button
+              class="secondary-button"
+              type="button"
+              :disabled="!planFeedback.trim()"
+              @click="requestPlanRevision"
+            >
+              Revise plan
+            </button>
+            <button class="primary-button" type="button" @click="workspace.approvePlan">
+              Approve & implement
+            </button>
           </div>
         </footer>
       </section>
