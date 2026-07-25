@@ -236,10 +236,11 @@ type MentionInput struct {
 }
 
 type TurnOptions struct {
-	Model    string         `json:"model,omitempty"`
-	Effort   string         `json:"effort,omitempty"`
-	Mode     string         `json:"mode,omitempty"`
-	Mentions []MentionInput `json:"mentions,omitempty"`
+	ProviderID string         `json:"providerId,omitempty"`
+	Model      string         `json:"model,omitempty"`
+	Effort     string         `json:"effort,omitempty"`
+	Mode       string         `json:"mode,omitempty"`
+	Mentions   []MentionInput `json:"mentions,omitempty"`
 }
 
 type ChatArchive struct {
@@ -370,10 +371,11 @@ func (a *App) ListProviderModels(providerID string) ([]ProviderModel, error) {
 		}
 		return result, nil
 	case "claude":
-		return []ProviderModel{{ID: "default", Name: "Claude default", ProviderID: providerID},
-			{ID: "sonnet", Name: "Claude Sonnet", ProviderID: providerID},
-			{ID: "opus", Name: "Claude Opus", ProviderID: providerID},
-			{ID: "haiku", Name: "Claude Haiku", ProviderID: providerID}}, nil
+		return []ProviderModel{
+			{ID: "claude-opus-4-8", Name: "Claude Opus 4.8 · complex agentic coding", ProviderID: providerID},
+			{ID: "claude-sonnet-4-6", Name: "Claude Sonnet 4.6 · balanced & fast", ProviderID: providerID},
+			{ID: "claude-haiku-4-5", Name: "Claude Haiku 4.5 · fastest", ProviderID: providerID},
+		}, nil
 	case "gemini":
 		return []ProviderModel{{ID: "default", Name: "Gemini default", ProviderID: providerID},
 			{ID: "gemini-2.5-pro", Name: "Gemini 2.5 Pro", ProviderID: providerID},
@@ -1205,26 +1207,7 @@ func (a *App) StartAgentThread(projectID, providerID, model string) (ThreadView,
 	if err != nil {
 		return ThreadView{}, err
 	}
-	if providerID == "" || providerID == "codex" {
-		return a.startThreadAt(projectID, project.CanonicalPath)
-	}
-	provider, err := a.installedProvider(providerID)
-	if err != nil {
-		return ThreadView{}, err
-	}
-	if !provider.Runnable && providerID != "ollama" {
-		return ThreadView{}, errors.New("provider chat adapter is not available")
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	thread := database.Thread{
-		ID: newLocalID("thread"), ProjectID: projectID, ProviderID: providerID, Model: model,
-		Title: "New thread", Status: "active", CreatedAt: now, UpdatedAt: now,
-	}
-	if err := a.store.UpsertThread(context.Background(), thread); err != nil {
-		return ThreadView{}, err
-	}
-	_ = a.store.TouchProject(context.Background(), projectID)
-	return threadView(thread), nil
+	return a.startThreadAt(projectID, project.CanonicalPath)
 }
 
 func (a *App) startThreadAt(projectID, cwd string, writableRoots ...string) (ThreadView, error) {
@@ -1249,7 +1232,7 @@ func (a *App) startThreadAt(projectID, cwd string, writableRoots ...string) (Thr
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	thread := database.Thread{
-		ID: response.Thread.ID, ProjectID: projectID, ProviderID: "codex", Title: "New thread",
+		ID: response.Thread.ID, ProjectID: projectID, ProviderID: "mixed", Title: "New thread",
 		Status: "active", CreatedAt: now, UpdatedAt: now,
 	}
 	if err := a.store.UpsertThread(context.Background(), thread); err != nil {
@@ -1267,7 +1250,7 @@ func (a *App) ResumeThread(threadID string) (ThreadView, error) {
 	if err != nil {
 		return ThreadView{}, err
 	}
-	if thread.ProviderID != "" && thread.ProviderID != "codex" {
+	if thread.ProviderID != "" && thread.ProviderID != "codex" && thread.ProviderID != "mixed" {
 		view := threadView(thread)
 		messages, messageErr := a.store.ListChatMessages(context.Background(), threadID)
 		if messageErr != nil {
@@ -1309,6 +1292,18 @@ func (a *App) ResumeThread(threadID string) (ThreadView, error) {
 	for _, turn := range response.Thread.Turns {
 		view.Items = append(view.Items, turn.Items...)
 	}
+	if messages, messageErr := a.store.ListChatMessages(context.Background(), threadID); messageErr == nil {
+		for _, message := range messages {
+			itemType := "agentMessage"
+			if message.Role == "user" {
+				continue
+			}
+			view.Items = append(view.Items, map[string]any{
+				"id": message.ID, "type": itemType, "text": message.Text,
+				"status": message.Status, "providerId": message.ProviderID,
+			})
+		}
+	}
 	return view, nil
 }
 
@@ -1325,7 +1320,8 @@ func (a *App) SendMessageWithOptions(threadID, text string, options TurnOptions)
 	if err != nil {
 		return TurnStart{}, err
 	}
-	if thread.ProviderID != "" && thread.ProviderID != "codex" {
+	if options.ProviderID != "" && options.ProviderID != "codex" {
+		thread.ProviderID = options.ProviderID
 		return a.sendExternalChat(thread, text, options)
 	}
 	var response struct {

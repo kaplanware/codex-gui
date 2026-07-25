@@ -117,6 +117,7 @@ export interface MentionInput {
 }
 
 export interface TurnOptions {
+  providerId?: string
   model?: string
   effort?: string
   mode?: 'default' | 'plan'

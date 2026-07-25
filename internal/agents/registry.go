@@ -76,7 +76,7 @@ func (r *Registry) Detect(ctx context.Context) []ProviderStatus {
 			status.Installed = true
 			status.Executable = path
 			status.Runnable = definition.ID == "codex" || definition.ID == "claude" ||
-				definition.ID == "gemini" || definition.ID == "opencode"
+				definition.ID == "gemini" || definition.ID == "opencode" || definition.ID == "ollama"
 			if status.Runnable {
 				status.Status = "available"
 			} else {

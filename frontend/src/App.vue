@@ -15,6 +15,8 @@ const prompt = ref('')
 const conversation = ref<HTMLElement | null>(null)
 const showDiagnostics = ref(false)
 const showModelMenu = ref(false)
+const showAgentMenu = ref(false)
+const showThreadMenu = ref(false)
 const currentView = ref<'chat' | 'agents' | 'settings'>('chat')
 const taskTitle = ref('')
 const taskPrompt = ref('')
@@ -59,7 +61,10 @@ onMounted(async () => {
     if (event.exitCode !== undefined) {
       consoleStatus.value = event.exitCode === 0 ? 'Session finished' : `Exited (${event.exitCode})`
       if (event.error) providerTerminal?.writeln(`\r\n\x1b[31m${event.error}\x1b[0m`)
-      globalThis.setTimeout(() => void workspace.loadAgentWorkspace(), 500)
+      globalThis.setTimeout(() => {
+        void workspace.loadProviders()
+        void workspace.loadProviderUsage()
+      }, 500)
     }
   })
   diagnostics.connectEvents()
@@ -83,6 +88,23 @@ watch(
 )
 
 watch(
+  () => workspace.selectedProvider,
+  () => {
+    showAgentMenu.value = false
+    showModelMenu.value = false
+  },
+)
+
+watch(
+  () => workspace.activeThread?.id,
+  () => {
+    showThreadMenu.value = false
+    showAgentMenu.value = false
+    showModelMenu.value = false
+  },
+)
+
+watch(
   () => workspace.items.map((item) => `${item.id}:${item.text?.length ?? 0}`).join('|'),
   async () => {
     await nextTick()
@@ -95,6 +117,19 @@ async function submit() {
   if (!text.trim()) return
   prompt.value = ''
   await workspace.send(text)
+}
+
+async function selectWorkspaceAgent(providerId: string) {
+  showAgentMenu.value = false
+  showModelMenu.value = false
+  await workspace.selectProvider(providerId)
+}
+
+function clearActiveThread() {
+  workspace.items = []
+  workspace.queue = []
+  workspace.planArtifact = null
+  showThreadMenu.value = false
 }
 
 function handlePromptInput() {
@@ -514,7 +549,7 @@ function backendOpen(path: string) {
               >
                 <strong>{{ thread.title || 'New thread' }}</strong>
                 <small>
-                  {{ workspace.agentProviders.find((provider) => provider.id === thread.providerId)?.name || thread.providerId }}
+                  {{ thread.providerId === 'mixed' ? 'Multi-agent' : workspace.agentProviders.find((provider) => provider.id === thread.providerId)?.name || thread.providerId }}
                   · {{ new Date(thread.updatedAt).toLocaleDateString() }}
                 </small>
               </button>
@@ -551,26 +586,6 @@ function backendOpen(path: string) {
             Choose a connected coding agent and work directly inside
             {{ workspace.activeProject.name }}.
           </p>
-          <div class="new-thread-routing">
-            <select
-              :value="workspace.selectedProvider"
-              @change="workspace.selectProvider(($event.target as HTMLSelectElement).value)"
-            >
-              <option
-                v-for="provider in workspace.agentProviders"
-                :key="provider.id"
-                :value="provider.id"
-                :disabled="!provider.runnable && provider.id !== 'ollama'"
-              >
-                {{ provider.name }}
-              </option>
-            </select>
-            <select v-model="workspace.selectedModel">
-              <option v-for="model in workspace.providerModels" :key="model.id" :value="model.id">
-                {{ model.name }}
-              </option>
-            </select>
-          </div>
           <button class="primary-button" type="button" @click="workspace.newThread()">
             New thread
           </button>
@@ -585,9 +600,30 @@ function backendOpen(path: string) {
               <span v-if="workspace.activeTurn" class="working-label">
                 {{ workspace.agentProviders.find((provider) => provider.id === workspace.selectedProvider)?.name || 'Agent' }} is working…
               </span>
-              <button class="secondary-button" type="button" @click="workspace.exportActiveThread">
-                Export
-              </button>
+              <div class="thread-more">
+                <button
+                  class="thread-more-trigger"
+                  type="button"
+                  aria-label="Thread actions"
+                  @click="showThreadMenu = !showThreadMenu"
+                >
+                  •••
+                </button>
+                <div v-if="showThreadMenu" class="thread-menu">
+                  <button
+                    type="button"
+                    @click="workspace.exportActiveThread(); showThreadMenu = false"
+                  >
+                    <span>Export chat</span><small>JSON</small>
+                  </button>
+                  <button type="button" @click="clearActiveThread">
+                    <span>Clear view</span><small>Local</small>
+                  </button>
+                  <button type="button" disabled>
+                    <span>Share thread</span><small class="coming-soon">◷ Coming soon</small>
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
           <div ref="conversation" class="conversation">
@@ -645,28 +681,47 @@ function backendOpen(path: string) {
               </button>
             </div>
             <div class="turn-controls">
-              <label class="inline-provider-select">
-                <span>Agent</span>
-                <select
-                  :value="workspace.selectedProvider"
-                  :disabled="!!workspace.activeTurn"
-                  @change="workspace.selectProvider(($event.target as HTMLSelectElement).value)"
+              <div class="agent-control">
+                <button
+                  class="agent-trigger"
+                  type="button"
+                  :disabled="!!workspace.activeTurn || !workspace.availableProviders.length"
+                  @click="showAgentMenu = !showAgentMenu; showModelMenu = false"
                 >
-                  <option
-                    v-for="provider in workspace.agentProviders"
+                  <span
+                    class="agent-avatar"
+                    :data-provider="workspace.selectedProvider"
+                  >{{ workspace.agentProviders.find((provider) => provider.id === workspace.selectedProvider)?.name.slice(0, 1) || '?' }}</span>
+                  <span>
+                    <small>Agent</small>
+                    <strong>{{ workspace.agentProviders.find((provider) => provider.id === workspace.selectedProvider)?.name || 'Connect an agent' }}</strong>
+                  </span>
+                  <b>⌄</b>
+                </button>
+                <div v-if="showAgentMenu" class="agent-menu">
+                  <button
+                    v-for="provider in workspace.availableProviders"
                     :key="provider.id"
-                    :value="provider.id"
-                    :disabled="!provider.runnable && provider.id !== 'ollama'"
+                    type="button"
+                    :class="{ active: provider.id === workspace.selectedProvider }"
+                    @click="selectWorkspaceAgent(provider.id)"
                   >
-                    {{ provider.name }} · {{ provider.authStatus }}
-                  </option>
-                </select>
-              </label>
+                    <span class="agent-avatar" :data-provider="provider.id">{{
+                      provider.name.slice(0, 1)
+                    }}</span>
+                    <span>
+                      <strong>{{ provider.name }}</strong>
+                      <small>{{ provider.version || 'Connected' }}</small>
+                    </span>
+                    <i></i>
+                  </button>
+                </div>
+              </div>
               <div class="model-control">
                 <button
                   class="control-trigger"
                   type="button"
-                  @click="showModelMenu = !showModelMenu"
+                  @click="showModelMenu = !showModelMenu; showAgentMenu = false"
                 >
                   <span>Model</span><strong>{{ workspace.providerModels.find((model) => model.id === workspace.selectedModel)?.name || 'Default' }}</strong><b>⌄</b>
                 </button>
@@ -759,7 +814,7 @@ function backendOpen(path: string) {
         <div>
           <p class="eyebrow">Provider-independent orchestration</p>
           <h1>Agent Mission Control</h1>
-          <span>Plan, implement, review, and verify across installed coding agents.</span>
+          <span>Run parallel delivery pipelines, review evidence, and resolve blocked work.</span>
         </div>
         <button class="secondary-button" type="button" @click="workspace.loadAgentWorkspace">
           Refresh
@@ -783,29 +838,6 @@ function backendOpen(path: string) {
 
       <div class="mission-layout">
         <section class="mission-main">
-          <div class="provider-strip">
-            <article
-              v-for="provider in workspace.agentProviders"
-              :key="provider.id"
-              :class="{ unavailable: !provider.runnable }"
-            >
-              <span class="provider-mark">{{ provider.name.slice(0, 1) }}</span>
-              <div>
-                <strong>{{ provider.name }}</strong>
-                <small>{{
-                  !provider.installed
-                    ? 'Not installed'
-                    : provider.runnable
-                      ? provider.version || 'Available'
-                      : 'Detected · adapter pending'
-                }}</small>
-                <small class="auth-state">{{ provider.authStatus }}</small>
-              </div>
-              <i :data-ready="provider.runnable"></i>
-              <small class="mission-provider-note">Manage in Settings</small>
-            </article>
-          </div>
-
           <div class="agent-table">
             <header>
               <span>Agent / role</span><span>Provider</span><span>Task</span><span>Status</span>
@@ -981,7 +1013,7 @@ function backendOpen(path: string) {
                 <select v-model="roleProviders[role]">
                   <option value="">Smart Router</option>
                   <option
-                    v-for="provider in workspace.agentProviders"
+                    v-for="provider in workspace.availableProviders"
                     :key="provider.id"
                     :value="provider.id"
                     :disabled="!provider.runnable"
@@ -1306,9 +1338,12 @@ function backendOpen(path: string) {
       </button>
     </aside>
 
-    <footer v-if="connected && workspace.providerUsage.length" class="provider-usage-footer">
+    <footer
+      v-if="connected && workspace.providerUsage.some((usage) => usage.authenticated)"
+      class="provider-usage-footer"
+    >
       <button
-        v-for="usage in workspace.providerUsage"
+        v-for="usage in workspace.providerUsage.filter((candidate) => candidate.authenticated)"
         :key="usage.providerId"
         type="button"
         :title="`${usage.detail}${usage.resetsAt ? ` · resets ${formatReset(usage.resetsAt)}` : ''}`"

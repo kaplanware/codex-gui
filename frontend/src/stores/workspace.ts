@@ -94,6 +94,13 @@ export const useWorkspaceStore = defineStore('workspace', {
     threads: (state) =>
       state.activeProject ? (state.threadsByProject[state.activeProject.id] ?? []) : [],
     currentModel: (state) => state.models.find((model) => model.id === state.selectedModel),
+    availableProviders: (state) =>
+      state.agentProviders.filter(
+        (provider) =>
+          provider.installed &&
+          provider.runnable &&
+          (provider.authStatus === 'authenticated' || provider.authStatus === 'not-required'),
+      ),
     supportedEfforts(): string[] {
       return this.currentModel?.supportedReasoningEfforts ?? []
     },
@@ -220,8 +227,14 @@ export const useWorkspaceStore = defineStore('workspace', {
     async loadProviders() {
       try {
         this.agentProviders = await backend.listAgentProviders()
-        if (!this.agentProviders.some((provider) => provider.id === this.selectedProvider && provider.runnable)) {
-          this.selectedProvider = this.agentProviders.find((provider) => provider.runnable)?.id ?? 'codex'
+        const available = this.agentProviders.filter(
+          (provider) =>
+            provider.installed &&
+            provider.runnable &&
+            (provider.authStatus === 'authenticated' || provider.authStatus === 'not-required'),
+        )
+        if (!available.some((provider) => provider.id === this.selectedProvider)) {
+          this.selectedProvider = available[0]?.id ?? ''
         }
         await this.loadProviderModels()
       } catch (error) {
@@ -241,9 +254,6 @@ export const useWorkspaceStore = defineStore('workspace', {
       this.selectedProvider = providerId
       this.selectedModel = ''
       await this.loadProviderModels()
-      if (this.activeProject && this.activeThread?.providerId !== providerId) {
-        await this.newThread(this.activeProject)
-      }
     },
     async loadProviderUsage() {
       try {
@@ -455,9 +465,10 @@ export const useWorkspaceStore = defineStore('workspace', {
           this.expandedProjects[project.id] = true
         }
         this.activeThread = resume ? await backend.resumeThread(thread.id) : thread
-        this.selectedProvider = this.activeThread.providerId || 'codex'
-        this.selectedModel = this.activeThread.model || ''
-        await this.loadProviderModels()
+        if (!this.selectedProvider && this.availableProviders[0]) {
+          this.selectedProvider = this.availableProviders[0].id
+          await this.loadProviderModels()
+        }
         this.items = this.activeThread.items ?? []
         this.diff = ''
         this.activeTurn = null
@@ -488,6 +499,7 @@ export const useWorkspaceStore = defineStore('workspace', {
         id: `local-${Date.now()}-${Math.random().toString(16).slice(2)}`,
         text: text.trim(),
         options: {
+          providerId: this.selectedProvider,
           model: this.selectedModel,
           effort: this.selectedEffort,
           mode: this.selectedMode,

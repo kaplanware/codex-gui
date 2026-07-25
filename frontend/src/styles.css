@@ -72,7 +72,7 @@ pre {
 .app-shell {
   position: relative;
   display: grid;
-  grid-template-rows: 58px minmax(0, 1fr);
+  grid-template-rows: 58px minmax(0, 1fr) 34px;
   height: 100vh;
   background:
     radial-gradient(circle at 92% 0%, rgba(62, 185, 144, 0.06), transparent 30rem), var(--bg);
@@ -502,6 +502,60 @@ pre {
   font-size: 0.68rem;
 }
 
+.thread-more {
+  position: relative;
+}
+
+.thread-more-trigger {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 5px 9px;
+  color: var(--muted);
+  background: var(--panel);
+  letter-spacing: 0.08em;
+}
+
+.thread-menu {
+  position: absolute;
+  z-index: 25;
+  top: calc(100% + 7px);
+  right: 0;
+  display: grid;
+  width: 220px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  padding: 5px;
+  background: var(--panel-2);
+  box-shadow: 0 18px 50px rgb(0 0 0 / 42%);
+}
+
+.thread-menu button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border: 0;
+  border-radius: 7px;
+  padding: 9px;
+  background: transparent;
+  text-align: left;
+}
+
+.thread-menu button:not(:disabled):hover {
+  background: var(--panel-3);
+}
+
+.thread-menu small {
+  color: var(--muted);
+  font-size: 0.58rem;
+}
+
+.thread-menu .coming-soon {
+  border-radius: 999px;
+  padding: 3px 6px;
+  color: var(--warning);
+  background: rgb(243 195 108 / 10%);
+}
+
 .conversation {
   min-height: 0;
   overflow-y: auto;
@@ -717,6 +771,118 @@ pre {
 
 .model-control {
   position: relative;
+}
+
+.agent-control {
+  position: relative;
+}
+
+.agent-trigger {
+  display: flex;
+  min-width: 190px;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 5px 8px;
+  background: var(--panel);
+  text-align: left;
+}
+
+.agent-trigger > span:nth-child(2) {
+  display: grid;
+}
+
+.agent-trigger small {
+  color: var(--muted);
+  font-size: 0.54rem;
+  text-transform: uppercase;
+}
+
+.agent-trigger strong {
+  font-size: 0.67rem;
+}
+
+.agent-trigger b {
+  margin-left: auto;
+  color: var(--muted);
+}
+
+.agent-avatar {
+  display: grid;
+  flex: 0 0 auto;
+  width: 25px;
+  height: 25px;
+  place-items: center;
+  border-radius: 8px;
+  color: #07110d;
+  background: var(--accent);
+  font-size: 0.68rem;
+  font-weight: 850;
+}
+
+.agent-avatar[data-provider='claude'] {
+  background: #d99b72;
+}
+
+.agent-avatar[data-provider='gemini'] {
+  background: #8eafff;
+}
+
+.agent-avatar[data-provider='opencode'] {
+  background: #d7dd68;
+}
+
+.agent-avatar[data-provider='ollama'] {
+  color: var(--text);
+  background: #404958;
+}
+
+.agent-menu {
+  position: absolute;
+  z-index: 18;
+  bottom: calc(100% + 7px);
+  display: grid;
+  width: 310px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 6px;
+  background: var(--panel-2);
+  box-shadow: 0 18px 50px rgb(0 0 0 / 45%);
+}
+
+.agent-menu button {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 9px;
+  border: 0;
+  border-radius: 9px;
+  padding: 9px;
+  background: transparent;
+  text-align: left;
+}
+
+.agent-menu button:hover,
+.agent-menu button.active {
+  background: var(--panel-3);
+}
+
+.agent-menu button > span:nth-child(2) {
+  display: grid;
+  gap: 2px;
+}
+
+.agent-menu small {
+  color: var(--muted);
+  font-size: 0.58rem;
+}
+
+.agent-menu i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
 }
 
 .control-trigger {
@@ -2012,7 +2178,7 @@ pre {
 
 .settings-provider-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(310px, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
   margin: 0 auto;
   max-width: 1100px;
@@ -2027,6 +2193,10 @@ pre {
   border-radius: 14px;
   padding: 18px;
   background: var(--panel);
+}
+
+.settings-provider-grid > article {
+  min-height: 82px;
 }
 
 .settings-provider-grid h3,
@@ -2094,15 +2264,15 @@ pre {
 }
 
 .provider-usage-footer {
-  position: fixed;
-  z-index: 45;
-  right: 14px;
-  bottom: 10px;
-  left: 14px;
+  z-index: 20;
   display: flex;
-  justify-content: center;
+  align-items: center;
+  justify-content: flex-start;
   gap: 7px;
-  pointer-events: none;
+  overflow-x: auto;
+  border-top: 1px solid var(--border-soft);
+  padding: 4px 14px;
+  background: #10141b;
 }
 
 .provider-usage-footer button {
@@ -2111,12 +2281,11 @@ pre {
   gap: 6px;
   border: 1px solid var(--border);
   border-radius: 999px;
-  padding: 6px 9px;
+  padding: 4px 8px;
   color: var(--muted);
   background: rgb(17 22 30 / 92%);
-  box-shadow: 0 6px 18px rgb(0 0 0 / 22%);
+  box-shadow: none;
   font-size: 0.6rem;
-  pointer-events: auto;
   cursor: pointer;
 }
 
