@@ -507,6 +507,37 @@ const rollbackRootTask = computed(
   () => workspace.agentTasks.find((bundle) => bundle.task.id === rollbackTaskId.value)?.task,
 )
 
+const currentProjectBranch = computed(
+  () =>
+    workspace.projectBranches.find((branch) => branch.current)?.name ??
+    workspace.activeProject?.defaultBranch ??
+    'current branch',
+)
+
+const isolatedTaskCount = computed(
+  () => workspace.agentTasks.filter((bundle) => Boolean(bundle.task.worktree)).length,
+)
+
+const queuedMergeCount = computed(
+  () => workspace.agentTasks.filter((bundle) => bundle.task.queueMerge).length,
+)
+
+function resolvedTaskBaseBranch(task: { baseBranch?: string }) {
+  return task.baseBranch || currentProjectBranch.value
+}
+
+function taskWorkingBranch(task: { taskBranch?: string; workspaceMode: string }) {
+  if (task.taskBranch) return task.taskBranch
+  return task.workspaceMode === 'current' ? currentProjectBranch.value : 'pending branch'
+}
+
+function taskWorkspaceLabel(task: { workspaceMode: string; worktree?: string }) {
+  if (task.worktree) return 'Isolated worktree'
+  if (task.workspaceMode === 'existing-branch') return 'Existing branch'
+  if (task.workspaceMode === 'new-branch') return 'New isolated branch'
+  return 'Shared workspace'
+}
+
 function openTaskDetail(taskId: string) {
   selectedTaskId.value = taskId
   selectedTaskTab.value = 'evidence'
@@ -1037,6 +1068,53 @@ function backendOpen(path: string) {
         </article>
       </div>
 
+      <section v-if="workspace.activeProject?.isGitRepository" class="git-workspace-board">
+        <header>
+          <div>
+            <p class="eyebrow">Git workspaces</p>
+            <h2>Branch lanes</h2>
+            <span>Each isolated task keeps its branch checked out without switching the main project.</span>
+          </div>
+          <div class="git-workspace-summary">
+            <span><b>Current</b>{{ currentProjectBranch }}</span>
+            <span><b>Branches</b>{{ workspace.projectBranches.length }}</span>
+            <span><b>Worktrees</b>{{ isolatedTaskCount }}</span>
+            <span><b>Merge queue</b>{{ queuedMergeCount }}</span>
+          </div>
+        </header>
+        <div class="git-lane-list">
+          <button
+            v-for="bundle in workspace.agentTasks"
+            :key="`git-${bundle.task.id}`"
+            type="button"
+            @click="openTaskDetail(bundle.task.id)"
+          >
+            <span class="git-lane-mode" :data-isolated="Boolean(bundle.task.worktree)">
+              {{ bundle.task.worktree ? 'WT' : 'MAIN' }}
+            </span>
+            <span class="git-lane-task">
+              <strong>{{ bundle.task.title }}</strong>
+              <small>{{ taskWorkspaceLabel(bundle.task) }}</small>
+            </span>
+            <span class="git-branch-flow">
+              <code>{{ resolvedTaskBaseBranch(bundle.task) }}</code>
+              <i>→</i>
+              <code class="working">{{ taskWorkingBranch(bundle.task) }}</code>
+              <template v-if="bundle.task.mergeTarget">
+                <i>→</i>
+                <code>{{ bundle.task.mergeTarget }}</code>
+              </template>
+            </span>
+            <span class="git-lane-state" :data-status="bundle.task.status">
+              {{ bundle.task.status }}
+            </span>
+          </button>
+          <div v-if="!workspace.agentTasks.length" class="mission-empty">
+            Branch lanes appear here after you create the first task.
+          </div>
+        </div>
+      </section>
+
       <section class="pipeline-board">
         <header>
           <div>
@@ -1063,6 +1141,11 @@ function backendOpen(path: string) {
             <span class="pipeline-copy">
               <strong>{{ bundle.task.title }}</strong>
               <small>{{ bundle.task.mode }} · {{ bundle.artifacts.length }} artifacts</small>
+              <span v-if="workspace.activeProject?.isGitRepository" class="pipeline-git-meta">
+                <b>{{ bundle.task.worktree ? 'worktree' : 'shared' }}</b>
+                <code>{{ taskWorkingBranch(bundle.task) }}</code>
+                <i v-if="bundle.task.mergeTarget">→ {{ bundle.task.mergeTarget }}</i>
+              </span>
             </span>
             <span class="pipeline-stages">
               <span
@@ -1447,6 +1530,36 @@ function backendOpen(path: string) {
           </div>
           <p>{{ selectedTask.task.prompt }}</p>
         </div>
+
+        <section
+          v-if="workspace.activeProject?.isGitRepository"
+          class="task-git-context"
+          :data-isolated="Boolean(selectedTask.task.worktree)"
+        >
+          <div>
+            <span class="git-context-icon">⑂</span>
+            <span>
+              <small>Git workspace</small>
+              <strong>{{ taskWorkspaceLabel(selectedTask.task) }}</strong>
+            </span>
+          </div>
+          <div class="task-git-flow">
+            <span><small>Base</small><code>{{ resolvedTaskBaseBranch(selectedTask.task) }}</code></span>
+            <i>→</i>
+            <span><small>Working branch</small><code>{{ taskWorkingBranch(selectedTask.task) }}</code></span>
+            <template v-if="selectedTask.task.mergeTarget">
+              <i>→</i>
+              <span><small>Merge target</small><code>{{ selectedTask.task.mergeTarget }}</code></span>
+            </template>
+          </div>
+          <div class="task-worktree-path">
+            <small>{{ selectedTask.task.worktree ? 'Linked worktree' : 'Project directory' }}</small>
+            <code :title="selectedTask.task.worktree || workspace.activeProject?.path">
+              {{ selectedTask.task.worktree || workspace.activeProject?.path }}
+            </code>
+          </div>
+          <span v-if="selectedTask.task.queueMerge" class="merge-queue-badge">Merge task queued</span>
+        </section>
 
         <div class="task-detail-body">
           <aside class="task-stage-list">
