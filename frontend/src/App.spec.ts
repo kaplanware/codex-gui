@@ -52,6 +52,13 @@ describe('App', () => {
           LogoutProvider: vi.fn(),
           ListAgentTasks: vi.fn().mockResolvedValue([]),
           CreateAgentTask: vi.fn(),
+          GetTaskChanges: vi.fn().mockResolvedValue({
+            taskId: '',
+            baselineAt: '',
+            capturedAt: '',
+            source: 'snapshot',
+            changes: [],
+          }),
           PreflightProject: vi.fn().mockResolvedValue([]),
           InspectProjectContext: vi.fn().mockResolvedValue([]),
           AssessCommandRisk: vi.fn(),

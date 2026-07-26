@@ -21,6 +21,7 @@ const currentView = ref<'chat' | 'agents' | 'settings'>('chat')
 const taskTitle = ref('')
 const taskPrompt = ref('')
 const taskWorkflow = ref<'delivery' | 'parallel'>('delivery')
+const taskDetailTabs = ['evidence', 'changes', 'activity'] as const
 const selectedRoles = ref(['planner', 'implementer', 'reviewer'])
 const roleProviders = ref<Record<string, string>>({})
 const memoryTitle = ref('')
@@ -29,6 +30,8 @@ const coordinationTaskId = ref('')
 const coordinationDraft = ref('')
 const selectedTaskId = ref('')
 const selectedArtifactId = ref('')
+const selectedTaskTab = ref<'evidence' | 'changes' | 'activity'>('evidence')
+const selectedChangePath = ref('')
 const setupProvider = ref<AgentProvider | null>(null)
 const consoleProvider = ref<AgentProvider | null>(null)
 const consoleElement = ref<HTMLElement | null>(null)
@@ -391,14 +394,85 @@ const selectedArtifact = computed(() => {
   )
 })
 
+const selectedTaskChanges = computed(() =>
+  selectedTask.value ? workspace.taskChangesByTask[selectedTask.value.task.id] : undefined,
+)
+
+const selectedChange = computed(() => {
+  const changes = selectedTaskChanges.value?.changes ?? []
+  return changes.find((change) => `${change.workspace}:${change.path}` === selectedChangePath.value) ?? changes[0]
+})
+
+const selectedTaskActivity = computed(() => {
+  const bundle = selectedTask.value
+  if (!bundle) return []
+  const events: Array<{ id: string; title: string; detail: string; timestamp: string; status: string }> = [
+    {
+      id: `created-${bundle.task.id}`,
+      title: 'Workflow created',
+      detail: `Manual delegation from Mission Control · ${bundle.task.mode}`,
+      timestamp: bundle.task.createdAt,
+      status: 'created',
+    },
+  ]
+  for (const run of bundle.runs) {
+    if (run.startedAt) {
+      events.push({
+        id: `started-${run.id}`,
+        title: `${run.role} started`,
+        detail: `${run.providerId} · ${run.summary || 'Agent process started'}`,
+        timestamp: run.startedAt,
+        status: 'running',
+      })
+    }
+    if (run.finishedAt) {
+      events.push({
+        id: `finished-${run.id}`,
+        title: `${run.role} ${run.status}`,
+        detail: `${run.providerId} · ${run.summary || run.status}`,
+        timestamp: run.finishedAt,
+        status: run.status,
+      })
+    }
+  }
+  for (const message of workspace.coordinationByTask[bundle.task.id] ?? []) {
+    events.push({
+      id: message.id,
+      title: `${message.role || 'agent'} · ${message.kind}`,
+      detail: message.message,
+      timestamp: message.createdAt,
+      status: message.kind,
+    })
+  }
+  return events.sort(
+    (left, right) => new Date(left.timestamp).getTime() - new Date(right.timestamp).getTime(),
+  )
+})
+
 function openTaskDetail(taskId: string) {
   selectedTaskId.value = taskId
+  selectedTaskTab.value = 'evidence'
+  selectedChangePath.value = ''
   const bundle = workspace.agentTasks.find((candidate) => candidate.task.id === taskId)
   selectedArtifactId.value =
     bundle?.artifacts.find((artifact) => artifact.type === 'plan')?.id ??
     bundle?.artifacts[0]?.id ??
     ''
   void workspace.loadCoordination(taskId)
+  void workspace.loadTaskChanges(taskId)
+}
+
+function selectTaskTab(tab: 'evidence' | 'changes' | 'activity') {
+  selectedTaskTab.value = tab
+  if (tab === 'changes' && selectedTask.value) {
+    void workspace.loadTaskChanges(selectedTask.value.task.id)
+  }
+}
+
+function formatBytes(size: number) {
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`
 }
 
 function readableArtifact(content: string) {
@@ -1239,30 +1313,117 @@ function backendOpen(path: string) {
           </aside>
 
           <section class="task-evidence">
-            <header>
-              <div>
-                <h3>Artifacts & evidence</h3>
-                <span>Plans, agent output, snapshots, diffs, and verification reports.</span>
-              </div>
-              <strong>{{ selectedTaskArtifacts.length }}</strong>
-            </header>
-            <div class="artifact-tabs">
+            <div class="task-detail-tabs">
               <button
-                v-for="artifact in selectedTaskArtifacts"
-                :key="artifact.id"
+                v-for="tab in taskDetailTabs"
+                :key="tab"
                 type="button"
-                :class="{ active: selectedArtifact?.id === artifact.id }"
-                :data-status="artifact.status"
-                @click="selectedArtifactId = artifact.id"
+                :class="{ active: selectedTaskTab === tab }"
+                @click="selectTaskTab(tab)"
               >
-                <strong>{{ artifact.title }}</strong>
-                <small>{{ artifact.type }} · {{ artifact.status }}</small>
+                {{ tab }}
+                <span v-if="tab === 'changes'">{{ selectedTaskChanges?.changes.length ?? 0 }}</span>
               </button>
             </div>
-            <pre v-if="selectedArtifact" class="artifact-content">{{
-              readableArtifact(selectedArtifact.content)
-            }}</pre>
-            <div v-else class="mission-empty">No evidence has been generated yet.</div>
+
+            <template v-if="selectedTaskTab === 'evidence'">
+              <header>
+                <div>
+                  <h3>Artifacts & evidence</h3>
+                  <span>Plans, agent output, snapshots, diffs, and verification reports.</span>
+                </div>
+                <strong>{{ selectedTaskArtifacts.length }}</strong>
+              </header>
+              <div class="artifact-tabs">
+                <button
+                  v-for="artifact in selectedTaskArtifacts"
+                  :key="artifact.id"
+                  type="button"
+                  :class="{ active: selectedArtifact?.id === artifact.id }"
+                  :data-status="artifact.status"
+                  @click="selectedArtifactId = artifact.id"
+                >
+                  <strong>{{ artifact.title }}</strong>
+                  <small>{{ artifact.type }} · {{ artifact.status }}</small>
+                </button>
+              </div>
+              <pre v-if="selectedArtifact" class="artifact-content">{{
+                readableArtifact(selectedArtifact.content)
+              }}</pre>
+              <div v-else class="mission-empty">No evidence has been generated yet.</div>
+            </template>
+
+            <template v-else-if="selectedTaskTab === 'changes'">
+              <header>
+                <div>
+                  <h3>Changes since task start</h3>
+                  <span>
+                    {{ selectedTaskChanges?.source === 'snapshot' ? 'Exact file baseline' : 'Inferred from file timestamps' }}
+                    · Git is not required
+                  </span>
+                </div>
+                <button type="button" @click="workspace.loadTaskChanges(selectedTask.task.id)">Refresh</button>
+              </header>
+              <div v-if="selectedTaskChanges?.changes.length" class="task-changes-layout">
+                <div class="task-change-list">
+                  <button
+                    v-for="change in selectedTaskChanges.changes"
+                    :key="`${change.workspace}:${change.path}`"
+                    type="button"
+                    :class="{ active: selectedChange === change }"
+                    :data-kind="change.kind"
+                    @click="selectedChangePath = `${change.workspace}:${change.path}`"
+                  >
+                    <span>{{ change.kind.slice(0, 1).toUpperCase() }}</span>
+                    <div>
+                      <strong>{{ change.path }}</strong>
+                      <small>{{ change.workspace }} · {{ formatBytes(change.size) }}</small>
+                    </div>
+                    <em v-if="change.inferred">inferred</em>
+                  </button>
+                </div>
+                <div class="task-change-preview">
+                  <header v-if="selectedChange">
+                    <strong>{{ selectedChange.path }}</strong>
+                    <span>{{ selectedChange.kind }} · {{ selectedChange.workspace }}</span>
+                  </header>
+                  <pre>{{ selectedChange?.diff || 'Inline diff is unavailable for this file.' }}</pre>
+                </div>
+              </div>
+              <div v-else class="mission-empty">
+                No file changes detected since this task started.
+              </div>
+            </template>
+
+            <template v-else>
+              <header>
+                <div>
+                  <h3>Origin & activity</h3>
+                  <span>Why this task exists and how the workflow progressed.</span>
+                </div>
+                <strong>{{ selectedTaskActivity.length }}</strong>
+              </header>
+              <div class="task-origin-card">
+                <span>Triggered by</span>
+                <strong>Manual delegation · Mission Control</strong>
+                <p>{{ selectedTask.task.prompt }}</p>
+                <div>
+                  <span>{{ selectedTask.task.mode }} workflow</span>
+                  <span>{{ new Date(selectedTask.task.createdAt).toLocaleString() }}</span>
+                  <span>{{ selectedTask.runs.length }} configured stages</span>
+                </div>
+              </div>
+              <div class="task-activity-feed">
+                <article v-for="event in selectedTaskActivity" :key="event.id" :data-status="event.status">
+                  <i></i>
+                  <div>
+                    <strong>{{ event.title }}</strong>
+                    <p>{{ event.detail }}</p>
+                  </div>
+                  <time>{{ new Date(event.timestamp).toLocaleString() }}</time>
+                </article>
+              </div>
+            </template>
           </section>
         </div>
 

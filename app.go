@@ -1224,19 +1224,113 @@ func (a *App) CreateTaskSnapshot(taskID string) (database.Artifact, error) {
 	if err != nil {
 		return database.Artifact{}, err
 	}
-	head, _ := commandOutput(context.Background(), project.CanonicalPath, 5*time.Second, "git", "rev-parse", "HEAD")
-	status, _ := commandOutput(context.Background(), project.CanonicalPath, 5*time.Second, "git", "status", "--porcelain=v1")
-	diff, _ := commandOutput(context.Background(), project.CanonicalPath, 10*time.Second, "git", "diff", "--binary")
-	content, _ := json.MarshalIndent(map[string]any{
-		"gitSha": strings.TrimSpace(head), "dirtyState": strings.Split(strings.TrimSpace(status), "\n"),
-		"diff": diff, "project": project.CanonicalPath, "capturedAt": time.Now().UTC(),
-	}, "", "  ")
+	files, err := captureTaskFiles(project.CanonicalPath)
+	if err != nil {
+		return database.Artifact{}, fmt.Errorf("capture project files: %w", err)
+	}
+	artifacts, _ := a.store.ListArtifacts(context.Background(), taskID)
+	isBaseline := true
+	for _, existing := range artifacts {
+		if existing.Type == "snapshot" {
+			isBaseline = false
+			break
+		}
+	}
+	payload := taskSnapshotPayload{
+		Project: project.CanonicalPath, CapturedAt: time.Now().UTC(), Baseline: isBaseline, Files: files,
+	}
+	if project.IsGitRepository {
+		head, _ := commandOutput(context.Background(), project.CanonicalPath, 5*time.Second, "git", "rev-parse", "HEAD")
+		status, _ := commandOutput(context.Background(), project.CanonicalPath, 5*time.Second, "git", "status", "--porcelain=v1")
+		diff, _ := commandOutput(context.Background(), project.CanonicalPath, 10*time.Second, "git", "diff", "--binary")
+		payload.GitSHA = strings.TrimSpace(head)
+		payload.DirtyState = strings.Split(strings.TrimSpace(status), "\n")
+		payload.Diff = diff
+	}
+	content, _ := json.MarshalIndent(payload, "", "  ")
 	timestamp := time.Now().UTC().Format(time.RFC3339Nano)
 	artifact := database.Artifact{
-		ID: newLocalID("snapshot"), TaskID: taskID, Type: "snapshot", Title: "Pre-run snapshot",
+		ID: newLocalID("snapshot"), TaskID: taskID, Type: "snapshot",
+		Title:  map[bool]string{true: "Pre-run baseline", false: "Task snapshot"}[isBaseline],
 		Status: "available", Content: string(content), CreatedAt: timestamp, UpdatedAt: timestamp,
 	}
 	return artifact, a.store.CreateArtifact(context.Background(), artifact)
+}
+
+func (a *App) GetTaskChanges(taskID string) (TaskChanges, error) {
+	task, err := a.store.GetTask(context.Background(), taskID)
+	if err != nil {
+		return TaskChanges{}, err
+	}
+	project, err := a.projects.Get(context.Background(), task.ProjectID)
+	if err != nil {
+		return TaskChanges{}, err
+	}
+	artifacts, err := a.store.ListArtifacts(context.Background(), taskID)
+	if err != nil {
+		return TaskChanges{}, err
+	}
+	runs, err := a.store.ListRuns(context.Background(), taskID)
+	if err != nil {
+		return TaskChanges{}, err
+	}
+	baseline, exact := snapshotFromArtifacts(artifacts)
+	result := TaskChanges{
+		TaskID: taskID, CapturedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Source: "snapshot",
+	}
+	if exact {
+		result.BaselineAt = baseline.CapturedAt.Format(time.RFC3339Nano)
+	} else {
+		result.BaselineAt = task.CreatedAt
+		result.Source = "inferred-from-task-time"
+	}
+	type workspaceRoot struct {
+		path, label, runID string
+	}
+	roots := []workspaceRoot{{path: project.CanonicalPath, label: "Project workspace"}}
+	seenRoots := map[string]bool{project.CanonicalPath: true}
+	for _, run := range runs {
+		if run.Worktree == "" || seenRoots[run.Worktree] {
+			continue
+		}
+		if info, statErr := os.Stat(run.Worktree); statErr == nil && info.IsDir() {
+			roots = append(roots, workspaceRoot{
+				path: run.Worktree, label: run.Role + " · " + run.ProviderID, runID: run.ID,
+			})
+			seenRoots[run.Worktree] = true
+		}
+	}
+	taskStartedAt, _ := time.Parse(time.RFC3339Nano, task.CreatedAt)
+	for _, root := range roots {
+		current, scanErr := captureTaskFiles(root.path)
+		if scanErr != nil {
+			continue
+		}
+		if exact {
+			result.Changes = append(result.Changes,
+				compareTaskFiles(baseline.Files, current, root.label, root.runID)...)
+			continue
+		}
+		for path, file := range current {
+			modifiedAt, parseErr := time.Parse(time.RFC3339Nano, file.ModifiedAt)
+			if parseErr != nil || modifiedAt.Before(taskStartedAt) {
+				continue
+			}
+			result.Changes = append(result.Changes, TaskFileChange{
+				Path: path, Kind: "added", Workspace: root.label, RunID: root.runID,
+				Size: file.Size, Diff: renderTaskDiff(path, "", file.Content, false, true, false, file.Text),
+				Inferred: true,
+			})
+		}
+	}
+	sort.Slice(result.Changes, func(i, j int) bool {
+		if result.Changes[i].Workspace == result.Changes[j].Workspace {
+			return result.Changes[i].Path < result.Changes[j].Path
+		}
+		return result.Changes[i].Workspace < result.Changes[j].Workspace
+	})
+	return result, nil
 }
 
 func (a *App) CreateTaskWorktree(taskID string) (database.Artifact, error) {

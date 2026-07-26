@@ -29,6 +29,7 @@ declare global {
           LogoutProvider(providerId: string): Promise<void>
           ListAgentTasks(projectId: string): Promise<unknown>
           CreateAgentTask(request: unknown): Promise<unknown>
+          GetTaskChanges(taskId: string): Promise<unknown>
           PreflightProject(projectId: string): Promise<unknown>
           InspectProjectContext(projectId: string): Promise<unknown>
           AssessCommandRisk(projectId: string, command: string): Promise<unknown>

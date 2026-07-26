@@ -19,6 +19,7 @@ import type {
   RateLimits,
   StartupStatus,
   Thread,
+  TaskChanges,
   TurnOptions,
   TurnStart,
 } from './types'
@@ -67,6 +68,7 @@ export const backend = {
   listAgentTasks: (projectId = '') => app().ListAgentTasks(projectId) as Promise<AgentTaskBundle[]>,
   createAgentTask: (request: AgentTaskRequest) =>
     app().CreateAgentTask(request) as Promise<AgentTaskBundle>,
+  getTaskChanges: (taskId: string) => app().GetTaskChanges(taskId) as Promise<TaskChanges>,
   preflightProject: (projectId: string) =>
     app().PreflightProject(projectId) as Promise<PreflightCheck[]>,
   inspectProjectContext: (projectId: string) =>

@@ -297,6 +297,24 @@ export interface AgentTaskBundle {
   artifacts: Artifact[]
 }
 
+export interface TaskFileChange {
+  path: string
+  kind: 'added' | 'modified' | 'deleted'
+  workspace: string
+  runId?: string
+  size: number
+  diff?: string
+  inferred: boolean
+}
+
+export interface TaskChanges {
+  taskId: string
+  baselineAt: string
+  capturedAt: string
+  source: 'snapshot' | 'inferred-from-task-time'
+  changes: TaskFileChange[]
+}
+
 export interface AgentTaskRequest {
   projectId: string
   title: string

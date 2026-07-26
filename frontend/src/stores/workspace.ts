@@ -20,6 +20,7 @@ import type {
   ProviderModel,
   ProviderUsage,
   RateLimits,
+  TaskChanges,
   Thread,
   TurnOptions,
   TurnStart,
@@ -57,6 +58,7 @@ export const useWorkspaceStore = defineStore('workspace', {
     providerUsage: [] as ProviderUsage[],
     selectedProvider: 'codex',
     agentTasks: [] as AgentTaskBundle[],
+    taskChangesByTask: {} as Record<string, TaskChanges>,
     preflight: [] as PreflightCheck[],
     contextEntries: [] as ContextEntry[],
     projectMemory: [] as ProjectMemory[],
@@ -300,6 +302,13 @@ export const useWorkspaceStore = defineStore('workspace', {
     async loadAgentTasks() {
       try {
         this.agentTasks = await backend.listAgentTasks(this.activeProject?.id ?? '')
+      } catch (error) {
+        this.error = message(error)
+      }
+    },
+    async loadTaskChanges(taskId: string) {
+      try {
+        this.taskChangesByTask[taskId] = await backend.getTaskChanges(taskId)
       } catch (error) {
         this.error = message(error)
       }
