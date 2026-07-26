@@ -128,3 +128,21 @@ func TestCreateTaskWorkspaceUsesLinkedWorktree(t *testing.T) {
 		t.Fatalf("main worktree branch changed: %q, %v", output, err)
 	}
 }
+
+func TestParseCheckedOutBranches(t *testing.T) {
+	output := `worktree /repo
+HEAD 1111111111111111111111111111111111111111
+branch refs/heads/main
+
+worktree /tmp/task-worktree
+HEAD 2222222222222222222222222222222222222222
+branch refs/heads/agent/feature
+`
+	branches := parseCheckedOutBranches(output)
+	if branches["main"] != "/repo" {
+		t.Fatalf("main worktree = %q, want /repo", branches["main"])
+	}
+	if branches["agent/feature"] != "/tmp/task-worktree" {
+		t.Fatalf("task worktree = %q, want /tmp/task-worktree", branches["agent/feature"])
+	}
+}

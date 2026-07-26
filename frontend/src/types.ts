@@ -362,6 +362,9 @@ export interface AgentTaskRequest {
 export interface BranchInfo {
   name: string
   current: boolean
+  remote: boolean
+  checkedOut: boolean
+  worktree?: string
 }
 
 export interface PreflightCheck {

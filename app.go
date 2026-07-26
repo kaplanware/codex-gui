@@ -107,8 +107,11 @@ type AgentTaskRequest struct {
 }
 
 type BranchInfo struct {
-	Name    string `json:"name"`
-	Current bool   `json:"current"`
+	Name       string `json:"name"`
+	Current    bool   `json:"current"`
+	Remote     bool   `json:"remote"`
+	CheckedOut bool   `json:"checkedOut"`
+	Worktree   string `json:"worktree,omitempty"`
 }
 
 type AgentTaskBundle struct {
@@ -632,23 +635,61 @@ func (a *App) ListProjectBranches(projectID string) ([]BranchInfo, error) {
 	if !project.IsGitRepository {
 		return []BranchInfo{}, nil
 	}
-	current, _ := commandOutput(context.Background(), project.CanonicalPath, 5*time.Second,
+	currentOutput, _ := commandOutput(context.Background(), project.CanonicalPath, 5*time.Second,
 		"git", "branch", "--show-current")
-	output, err := commandOutput(context.Background(), project.CanonicalPath, 5*time.Second,
+	localOutput, err := commandOutput(context.Background(), project.CanonicalPath, 5*time.Second,
 		"git", "for-each-ref", "--format=%(refname:short)", "refs/heads")
 	if err != nil {
 		return nil, err
 	}
-	current = strings.TrimSpace(current)
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-	branches := make([]BranchInfo, 0, len(lines))
-	for _, name := range lines {
+	remoteOutput, _ := commandOutput(context.Background(), project.CanonicalPath, 5*time.Second,
+		"git", "for-each-ref", "--format=%(refname:short)", "refs/remotes")
+	worktreeOutput, _ := commandOutput(context.Background(), project.CanonicalPath, 5*time.Second,
+		"git", "worktree", "list", "--porcelain")
+	checkedOut := parseCheckedOutBranches(worktreeOutput)
+	current := strings.TrimSpace(currentOutput)
+	branches := make([]BranchInfo, 0)
+	for _, name := range strings.Split(strings.TrimSpace(localOutput), "\n") {
 		name = strings.TrimSpace(name)
 		if name != "" {
-			branches = append(branches, BranchInfo{Name: name, Current: name == current})
+			branches = append(branches, BranchInfo{
+				Name: name, Current: name == current, CheckedOut: checkedOut[name] != "",
+				Worktree: checkedOut[name],
+			})
 		}
 	}
+	for _, name := range strings.Split(strings.TrimSpace(remoteOutput), "\n") {
+		name = strings.TrimSpace(name)
+		if name != "" && !strings.HasSuffix(name, "/HEAD") {
+			branches = append(branches, BranchInfo{Name: name, Remote: true})
+		}
+	}
+	sort.SliceStable(branches, func(i, j int) bool {
+		if branches[i].Current != branches[j].Current {
+			return branches[i].Current
+		}
+		if branches[i].Remote != branches[j].Remote {
+			return !branches[i].Remote
+		}
+		return branches[i].Name < branches[j].Name
+	})
 	return branches, nil
+}
+
+func parseCheckedOutBranches(output string) map[string]string {
+	result := make(map[string]string)
+	worktree := ""
+	for _, line := range strings.Split(output, "\n") {
+		if strings.HasPrefix(line, "worktree ") {
+			worktree = strings.TrimSpace(strings.TrimPrefix(line, "worktree "))
+			continue
+		}
+		if strings.HasPrefix(line, "branch refs/heads/") {
+			branch := strings.TrimSpace(strings.TrimPrefix(line, "branch refs/heads/"))
+			result[branch] = worktree
+		}
+	}
+	return result
 }
 
 func (a *App) CreateAgentTask(request AgentTaskRequest) (AgentTaskBundle, error) {
@@ -700,6 +741,34 @@ func (a *App) CreateAgentTask(request AgentTaskRequest) (AgentTaskBundle, error)
 		request.WorkspaceMode = "current"
 		request.BaseBranch, request.TaskBranch, request.MergeTarget = "", "", ""
 		request.QueueMerge = false
+	} else {
+		currentBranch, _ := commandOutput(context.Background(), project.CanonicalPath, 5*time.Second,
+			"git", "branch", "--show-current")
+		currentBranch = strings.TrimSpace(currentBranch)
+		if currentBranch == "" {
+			currentBranch = project.DefaultBranch
+		}
+		switch request.WorkspaceMode {
+		case "current":
+			request.BaseBranch = currentBranch
+			request.TaskBranch = currentBranch
+			request.QueueMerge = false
+			request.MergeTarget = ""
+		case "existing-branch":
+			request.TaskBranch = strings.TrimSpace(request.TaskBranch)
+			if request.TaskBranch == "" {
+				return AgentTaskBundle{}, errors.New("select a local branch for the isolated task workspace")
+			}
+			request.BaseBranch = request.TaskBranch
+		case "new-branch":
+			request.BaseBranch = strings.TrimSpace(request.BaseBranch)
+			if request.BaseBranch == "" {
+				request.BaseBranch = currentBranch
+			}
+			request.TaskBranch = strings.TrimSpace(request.TaskBranch)
+		default:
+			return AgentTaskBundle{}, fmt.Errorf("unsupported Git workspace mode %q", request.WorkspaceMode)
+		}
 	}
 	timestamp := time.Now().UTC().Format(time.RFC3339Nano)
 	taskID := newLocalID("task")
@@ -708,9 +777,13 @@ func (a *App) CreateAgentTask(request AgentTaskRequest) (AgentTaskBundle, error)
 		if request.BaseBranch == "" {
 			request.BaseBranch = project.DefaultBranch
 		}
-		baseSHA, _ = commandOutput(context.Background(), project.CanonicalPath, 5*time.Second,
-			"git", "rev-parse", request.BaseBranch)
+		var resolveErr error
+		baseSHA, resolveErr = commandOutput(context.Background(), project.CanonicalPath, 5*time.Second,
+			"git", "rev-parse", "--verify", request.BaseBranch+"^{commit}")
 		baseSHA = strings.TrimSpace(baseSHA)
+		if resolveErr != nil && request.WorkspaceMode != "current" {
+			return AgentTaskBundle{}, fmt.Errorf("base branch %q does not resolve to a commit", request.BaseBranch)
+		}
 	}
 	task := database.Task{
 		ID: taskID, ProjectID: request.ProjectID, Title: request.Title,
@@ -2625,6 +2698,15 @@ func (a *App) createTaskWorkspace(
 	case "existing-branch":
 		if branch == "" {
 			return "", "", errors.New("select an existing branch for this task")
+		}
+		if _, verifyErr := commandOutput(context.Background(), project.CanonicalPath, 5*time.Second,
+			"git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch); verifyErr != nil {
+			return "", "", fmt.Errorf("%q is not a local branch; create a new branch from the remote branch instead", branch)
+		}
+		worktreeOutput, _ := commandOutput(context.Background(), project.CanonicalPath, 5*time.Second,
+			"git", "worktree", "list", "--porcelain")
+		if checkedOutAt := parseCheckedOutBranches(worktreeOutput)[branch]; checkedOutAt != "" {
+			return "", "", fmt.Errorf("branch %q is already checked out at %s; choose Current workspace or create a new branch", branch, checkedOutAt)
 		}
 		args = append(args, target, branch)
 	case "new-branch":

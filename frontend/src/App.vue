@@ -23,7 +23,8 @@ const taskPrompt = ref('')
 const taskWorkflow = ref<'delivery' | 'parallel'>('delivery')
 const taskWorkspaceMode = ref<'current' | 'new-branch' | 'existing-branch'>('new-branch')
 const taskBaseBranch = ref('')
-const taskBranch = ref('')
+const taskNewBranch = ref('')
+const taskExistingBranch = ref('')
 const taskApprovalMode = ref<'manual' | 'auto'>('manual')
 const taskQueueMerge = ref(false)
 const taskMergeTarget = ref('')
@@ -120,7 +121,13 @@ watch(
 )
 
 watch(
-  () => workspace.projectBranches.map((branch) => `${branch.name}:${branch.current}`).join('|'),
+  () =>
+    workspace.projectBranches
+      .map(
+        (branch) =>
+          `${branch.name}:${branch.current}:${branch.remote}:${branch.checkedOut}:${branch.worktree ?? ''}`,
+      )
+      .join('|'),
   () => {
     const current =
       workspace.projectBranches.find((branch) => branch.current)?.name ??
@@ -132,6 +139,18 @@ watch(
     if (!taskMergeTarget.value || !workspace.projectBranches.some((branch) => branch.name === taskMergeTarget.value)) {
       taskMergeTarget.value = current
     }
+    const availableExisting = workspace.projectBranches.find(
+      (branch) => !branch.remote && !branch.checkedOut,
+    )
+    if (
+      !taskExistingBranch.value ||
+      !workspace.projectBranches.some(
+        (branch) =>
+          branch.name === taskExistingBranch.value && !branch.remote && !branch.checkedOut,
+      )
+    ) {
+      taskExistingBranch.value = availableExisting?.name ?? ''
+    }
     if (!workspace.activeProject?.isGitRepository) {
       taskWorkspaceMode.value = 'current'
       taskQueueMerge.value = false
@@ -139,6 +158,15 @@ watch(
   },
   { immediate: true },
 )
+
+watch(taskWorkspaceMode, (mode) => {
+  if (mode === 'current') {
+    taskQueueMerge.value = false
+    taskMergeTarget.value = ''
+  } else if (!taskMergeTarget.value) {
+    taskMergeTarget.value = currentProjectBranch.value
+  }
+})
 
 watch(
   () => workspace.items.map((item) => `${item.id}:${item.text?.length ?? 0}`).join('|'),
@@ -244,7 +272,13 @@ function toggleRole(role: string) {
 
 async function createAgentTask() {
   if (!taskPrompt.value.trim()) return
-  await workspace.createAgentTask({
+  const branch =
+    taskWorkspaceMode.value === 'current'
+      ? currentProjectBranch.value
+      : taskWorkspaceMode.value === 'existing-branch'
+        ? taskExistingBranch.value
+        : taskNewBranch.value
+  const created = await workspace.createAgentTask({
     title: taskTitle.value,
     prompt: taskPrompt.value,
     workflow: taskWorkflow.value,
@@ -253,16 +287,22 @@ async function createAgentTask() {
       selectedRoles.value.map((role) => [role, roleProviders.value[role] || 'auto']),
     ),
     workspaceMode: workspace.activeProject?.isGitRepository ? taskWorkspaceMode.value : 'current',
-    baseBranch: taskBaseBranch.value,
-    taskBranch: taskBranch.value,
+    baseBranch:
+      taskWorkspaceMode.value === 'existing-branch'
+        ? taskExistingBranch.value
+        : taskWorkspaceMode.value === 'current'
+          ? currentProjectBranch.value
+          : taskBaseBranch.value,
+    taskBranch: branch,
     approvalMode: taskApprovalMode.value,
     queueMerge: taskQueueMerge.value,
     mergeTarget: taskMergeTarget.value,
     parentTaskId: taskParentId.value,
   })
+  if (!created) return
   taskTitle.value = ''
   taskPrompt.value = ''
-  taskBranch.value = ''
+  taskNewBranch.value = ''
 }
 
 async function openRunThread(threadId?: string) {
@@ -521,6 +561,35 @@ const isolatedTaskCount = computed(
 const queuedMergeCount = computed(
   () => workspace.agentTasks.filter((bundle) => bundle.task.queueMerge).length,
 )
+
+const baseBranchOptions = computed(() => workspace.projectBranches)
+
+const existingBranchOptions = computed(() =>
+  workspace.projectBranches.filter((branch) => !branch.remote),
+)
+
+const taskGitConfigurationValid = computed(() => {
+  if (!workspace.activeProject?.isGitRepository) return true
+  if (taskWorkspaceMode.value === 'current') return Boolean(currentProjectBranch.value)
+  if (taskWorkspaceMode.value === 'existing-branch') {
+    const branch = existingBranchOptions.value.find(
+      (candidate) => candidate.name === taskExistingBranch.value,
+    )
+    return Boolean(branch && !branch.checkedOut)
+  }
+  return Boolean(taskBaseBranch.value)
+})
+
+const suggestedTaskBranch = computed(() => {
+  const source = (taskTitle.value || taskPrompt.value || 'task').toLocaleLowerCase('en-US')
+  const slug = source
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 42)
+  return `agent/${slug || 'task'}`
+})
 
 function resolvedTaskBaseBranch(task: { baseBranch?: string }) {
   return task.baseBranch || currentProjectBranch.value
@@ -1293,29 +1362,82 @@ function backendOpen(path: string) {
                 <span><strong>{{ option.title }}</strong><small>{{ option.detail }}</small></span>
               </label>
             </div>
-            <div v-if="taskWorkspaceMode !== 'current'" class="builder-two-column">
+            <div v-if="taskWorkspaceMode === 'current'" class="branch-selection-summary warning">
+              <span>
+                <small>Working directly on</small>
+                <code>{{ currentProjectBranch }}</code>
+              </span>
+              <p>
+                Agents share the project directory. Parallel tasks and automatic merge tasks are
+                disabled for this workspace mode.
+              </p>
+            </div>
+            <div v-else class="builder-two-column">
               <label>
                 <span>{{ taskWorkspaceMode === 'new-branch' ? 'Base branch' : 'Task branch' }}</span>
                 <select
                   v-if="taskWorkspaceMode === 'new-branch'"
                   v-model="taskBaseBranch"
                 >
-                  <option v-for="branch in workspace.projectBranches" :key="branch.name" :value="branch.name">
-                    {{ branch.name }}{{ branch.current ? ' · current' : '' }}
+                  <option v-for="branch in baseBranchOptions" :key="branch.name" :value="branch.name">
+                    {{ branch.name }}{{ branch.current ? ' · current' : branch.remote ? ' · remote' : '' }}
                   </option>
                 </select>
-                <select v-else v-model="taskBranch">
+                <select v-else v-model="taskExistingBranch">
                   <option value="">Select branch…</option>
-                  <option v-for="branch in workspace.projectBranches" :key="branch.name" :value="branch.name">
-                    {{ branch.name }}{{ branch.current ? ' · checked out' : '' }}
+                  <option
+                    v-for="branch in existingBranchOptions"
+                    :key="branch.name"
+                    :value="branch.name"
+                    :disabled="branch.checkedOut"
+                  >
+                    {{ branch.name }}{{ branch.checkedOut ? ' · already checked out' : '' }}
                   </option>
                 </select>
               </label>
               <label v-if="taskWorkspaceMode === 'new-branch'">
                 <span>New branch name</span>
-                <input v-model="taskBranch" type="text" placeholder="Auto-generated when empty" />
+                <div class="branch-name-input">
+                  <input
+                    v-model="taskNewBranch"
+                    type="text"
+                    :placeholder="`${suggestedTaskBranch}-…`"
+                    spellcheck="false"
+                  />
+                  <button
+                    v-if="!taskNewBranch"
+                    type="button"
+                    @click="taskNewBranch = suggestedTaskBranch"
+                  >
+                    Use suggestion
+                  </button>
+                </div>
               </label>
             </div>
+            <div v-if="taskWorkspaceMode !== 'current'" class="branch-selection-summary">
+              <span>
+                <small>{{ taskWorkspaceMode === 'new-branch' ? 'Create from' : 'Open branch' }}</small>
+                <code>{{
+                  taskWorkspaceMode === 'new-branch' ? taskBaseBranch : taskExistingBranch || 'Select a branch'
+                }}</code>
+              </span>
+              <i>→</i>
+              <span>
+                <small>Task workspace</small>
+                <code>{{
+                  taskWorkspaceMode === 'new-branch'
+                    ? taskNewBranch || `${suggestedTaskBranch}-…`
+                    : 'New linked worktree'
+                }}</code>
+              </span>
+            </div>
+            <p
+              v-if="taskWorkspaceMode === 'existing-branch' && !existingBranchOptions.some((branch) => !branch.checkedOut)"
+              class="builder-inline-warning"
+            >
+              Every local branch is already checked out. Create a new isolated branch or use the
+              current workspace.
+            </p>
             <small class="builder-help">
               Linked worktrees keep task branches checked out simultaneously without switching the
               project’s main working directory.
@@ -1419,23 +1541,37 @@ function backendOpen(path: string) {
                 </option>
               </select>
             </label>
-            <label v-if="workspace.activeProject?.isGitRepository" class="builder-check">
+            <label
+              v-if="workspace.activeProject?.isGitRepository && taskWorkspaceMode !== 'current'"
+              class="builder-check"
+            >
               <input v-model="taskQueueMerge" type="checkbox" />
               <span>
                 <strong>Queue merge task when complete</strong>
                 <small>Create an approval-gated merge step after verification.</small>
               </span>
             </label>
-            <label v-if="taskQueueMerge && workspace.activeProject?.isGitRepository">
+            <label
+              v-if="
+                taskQueueMerge &&
+                workspace.activeProject?.isGitRepository &&
+                taskWorkspaceMode !== 'current'
+              "
+            >
               <span>Merge target</span>
               <select v-model="taskMergeTarget">
-                <option v-for="branch in workspace.projectBranches" :key="branch.name" :value="branch.name">
+                <option
+                  v-for="branch in existingBranchOptions"
+                  :key="branch.name"
+                  :value="branch.name"
+                >
                   {{ branch.name }}
                 </option>
               </select>
             </label>
           </section>
 
+          <p v-if="workspace.error" class="builder-error" role="alert">{{ workspace.error }}</p>
           <div class="router-note">
             <strong>Smart Router</strong>
             <p>
@@ -1446,10 +1582,16 @@ function backendOpen(path: string) {
           <button
             class="primary-button create-workflow"
             type="button"
-            :disabled="!workspace.activeProject || !taskPrompt.trim() || !selectedRoles.length"
+            :disabled="
+              workspace.busy ||
+              !workspace.activeProject ||
+              !taskPrompt.trim() ||
+              !selectedRoles.length ||
+              !taskGitConfigurationValid
+            "
             @click="createAgentTask"
           >
-            Create task & run planner
+            {{ workspace.busy ? 'Creating workspace…' : 'Create task & run planner' }}
           </button>
         </aside>
       </div>

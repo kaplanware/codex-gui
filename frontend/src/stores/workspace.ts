@@ -322,11 +322,15 @@ export const useWorkspaceStore = defineStore('workspace', {
       }
     },
     async createAgentTask(request: Omit<AgentTaskRequest, 'projectId'>) {
-      if (!this.activeProject) return
+      if (!this.activeProject) return false
+      let created = false
       await this.run(async () => {
         await backend.createAgentTask({ ...request, projectId: this.activeProject!.id })
         await this.loadAgentTasks()
+        await this.loadAgentWorkspace()
+        created = true
       })
+      return created
     },
     async createTaskSnapshot(taskId: string) {
       await this.run(async () => {
