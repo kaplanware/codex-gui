@@ -311,13 +311,21 @@ func (s *Store) ListRuns(ctx context.Context, taskID string) ([]AgentRun, error)
 
 func (s *Store) UpdateRun(ctx context.Context, id, status string, progress int, summary, threadID string) error {
 	finished := ""
-	if status == "completed" || status == "failed" || status == "cancelled" {
+	if status == "completed" || status == "failed" || status == "cancelled" || status == "interrupted" {
 		finished = now()
 	}
 	_, err := s.db.ExecContext(ctx, `UPDATE agent_runs SET status = ?, progress = ?, summary = ?,
 		thread_id = CASE WHEN ? = '' THEN thread_id ELSE ? END,
+		started_at = CASE WHEN ? = 'running' AND (started_at IS NULL OR started_at = '') THEN ? ELSE started_at END,
 		finished_at = CASE WHEN ? = '' THEN finished_at ELSE ? END WHERE id = ?`,
-		status, progress, nullIfEmpty(summary), threadID, threadID, finished, finished, id)
+		status, progress, nullIfEmpty(summary), threadID, threadID, status, now(), finished, finished, id)
+	return err
+}
+
+func (s *Store) ResetRun(ctx context.Context, id, status, summary string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE agent_runs SET status = ?, progress = 0, summary = ?,
+		thread_id = NULL, started_at = NULL, finished_at = NULL WHERE id = ?`,
+		status, nullIfEmpty(summary), id)
 	return err
 }
 

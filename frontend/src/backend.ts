@@ -75,6 +75,11 @@ export const backend = {
   createTaskWorktree: (taskId: string) => app().CreateTaskWorktree(taskId),
   runTaskVerification: (taskId: string) => app().RunTaskVerification(taskId),
   approveAgentTaskStage: (taskId: string) => app().ApproveAgentTaskStage(taskId),
+  continueAgentTask: (taskId: string) => app().ContinueAgentTask(taskId),
+  retryAgentTaskRun: (taskId: string, runId: string) =>
+    app().RetryAgentTaskRun(taskId, runId),
+  cancelAgentTask: (taskId: string) => app().CancelAgentTask(taskId),
+  restartAgentTask: (taskId: string) => app().RestartAgentTask(taskId),
   listCoordinationMessages: (taskId: string) =>
     app().ListCoordinationMessages(taskId) as Promise<CoordinationMessage[]>,
   postCoordinationMessage: (taskId: string, message: string) =>

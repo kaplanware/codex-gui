@@ -44,6 +44,10 @@ declare global {
           CreateTaskWorktree(taskId: string): Promise<unknown>
           RunTaskVerification(taskId: string): Promise<unknown>
           ApproveAgentTaskStage(taskId: string): Promise<void>
+          ContinueAgentTask(taskId: string): Promise<void>
+          RetryAgentTaskRun(taskId: string, runId: string): Promise<void>
+          CancelAgentTask(taskId: string): Promise<void>
+          RestartAgentTask(taskId: string): Promise<void>
           ListCoordinationMessages(taskId: string): Promise<unknown>
           PostCoordinationMessage(
             taskId: string,

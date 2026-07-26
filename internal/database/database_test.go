@@ -52,6 +52,21 @@ func TestProjectAndThreadPersistence(t *testing.T) {
 	if err != nil || len(runs) != 1 {
 		t.Fatalf("ListRuns() = %v, %v", runs, err)
 	}
+	if err := store.UpdateRun(ctx, "run-1", "running", 10, "Started", "thread-1"); err != nil {
+		t.Fatalf("UpdateRun() error = %v", err)
+	}
+	runs, err = store.ListRuns(ctx, task.ID)
+	if err != nil || runs[0].StartedAt == "" || runs[0].ThreadID != "thread-1" {
+		t.Fatalf("running ListRuns() = %v, %v", runs, err)
+	}
+	if err := store.ResetRun(ctx, "run-1", "queued", "Retry"); err != nil {
+		t.Fatalf("ResetRun() error = %v", err)
+	}
+	runs, err = store.ListRuns(ctx, task.ID)
+	if err != nil || runs[0].Status != "queued" || runs[0].ThreadID != "" ||
+		runs[0].StartedAt != "" || runs[0].FinishedAt != "" {
+		t.Fatalf("reset ListRuns() = %v, %v", runs, err)
+	}
 	projects, err := store.ListProjects(ctx)
 	if err != nil || len(projects) != 1 {
 		t.Fatalf("ListProjects() = %v, %v", projects, err)

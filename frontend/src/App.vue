@@ -232,6 +232,24 @@ async function openRunThread(threadId?: string) {
   }
 }
 
+async function cancelSelectedTask() {
+  const task = selectedTask.value?.task
+  if (!task || !globalThis.confirm('Cancel this workflow and stop its active agents?')) return
+  await workspace.cancelTask(task.id)
+}
+
+async function restartSelectedTask() {
+  const task = selectedTask.value?.task
+  if (
+    !task ||
+    !globalThis.confirm(
+      'Restart this workflow from the first stage? Existing project files will be preserved.',
+    )
+  )
+    return
+  await workspace.restartTask(task.id)
+}
+
 async function proposeMemory() {
   await workspace.proposeMemory('constraint', memoryTitle.value, memoryContent.value)
   memoryTitle.value = ''
@@ -402,7 +420,12 @@ const waitingRuns = computed(() =>
 const failedRuns = computed(() =>
   workspace.agentTasks
     .flatMap((bundle) => bundle.runs)
-    .filter((run) => run.status === 'failed' || run.status === 'unavailable'),
+    .filter(
+      (run) =>
+        run.status === 'failed' ||
+        run.status === 'unavailable' ||
+        run.status === 'interrupted',
+    ),
 )
 
 function itemTitle(item: ConversationItem): string {
@@ -1197,6 +1220,14 @@ function backendOpen(path: string) {
                 <span>{{ run.status }}</span>
                 <progress :value="run.progress" max="100"></progress>
                 <button
+                  v-if="['interrupted', 'failed', 'cancelled'].includes(run.status)"
+                  type="button"
+                  :disabled="workspace.busy"
+                  @click="workspace.retryTaskRun(selectedTask.task.id, run.id)"
+                >
+                  Retry stage
+                </button>
+                <button
                   v-if="run.threadId"
                   type="button"
                   @click="openRunThread(run.threadId); selectedTaskId = ''"
@@ -1243,6 +1274,15 @@ function backendOpen(path: string) {
             </button>
           </div>
           <div>
+            <button
+              v-if="selectedTask.task.status === 'interrupted'"
+              class="primary-button"
+              type="button"
+              :disabled="workspace.busy"
+              @click="workspace.continueTask(selectedTask.task.id)"
+            >
+              Continue
+            </button>
             <button type="button" @click="workspace.createTaskSnapshot(selectedTask.task.id)">
               Snapshot
             </button>
@@ -1260,6 +1300,23 @@ function backendOpen(path: string) {
               @click="workspace.approveTaskStage(selectedTask.task.id)"
             >
               Approve next stage
+            </button>
+            <button
+              v-if="!['completed', 'completed-with-findings', 'cancelled'].includes(selectedTask.task.status)"
+              class="danger-button"
+              type="button"
+              :disabled="workspace.busy"
+              @click="cancelSelectedTask"
+            >
+              Cancel
+            </button>
+            <button
+              class="secondary-button"
+              type="button"
+              :disabled="workspace.busy"
+              @click="restartSelectedTask"
+            >
+              Restart from beginning
             </button>
           </div>
         </footer>

@@ -335,6 +335,30 @@ export const useWorkspaceStore = defineStore('workspace', {
         await this.loadAgentTasks()
       })
     },
+    async continueTask(taskId: string) {
+      await this.run(async () => {
+        await backend.continueAgentTask(taskId)
+        await this.loadAgentTasks()
+      })
+    },
+    async retryTaskRun(taskId: string, runId: string) {
+      await this.run(async () => {
+        await backend.retryAgentTaskRun(taskId, runId)
+        await this.loadAgentTasks()
+      })
+    },
+    async cancelTask(taskId: string) {
+      await this.run(async () => {
+        await backend.cancelAgentTask(taskId)
+        await this.loadAgentTasks()
+      })
+    },
+    async restartTask(taskId: string) {
+      await this.run(async () => {
+        await backend.restartAgentTask(taskId)
+        await this.loadAgentTasks()
+      })
+    },
     async loadCoordination(taskId: string) {
       try {
         this.coordinationByTask[taskId] = await backend.listCoordinationMessages(taskId)

@@ -37,6 +37,8 @@ type App struct {
 	terminals      *terminal.Manager
 	runMu          sync.Mutex
 	turnRuns       map[string]runReference
+	runCancels     map[string]context.CancelFunc
+	runAttempts    map[string]string
 	chatMu         sync.Mutex
 	chatCancels    map[string]context.CancelFunc
 	coordinationMu sync.Mutex
@@ -55,6 +57,7 @@ func NewApp() *App {
 	app := &App{
 		manager: codex.NewManager(logger), store: store, databaseErr: err, logger: logger,
 		agentRegistry: agents.NewRegistry(), turnRuns: make(map[string]runReference),
+		runCancels: make(map[string]context.CancelFunc), runAttempts: make(map[string]string),
 		watchers: make(map[string]context.CancelFunc), chatCancels: make(map[string]context.CancelFunc),
 	}
 	if store != nil {
@@ -76,6 +79,7 @@ func (a *App) startup(ctx context.Context) {
 	})
 	go func() {
 		a.agentRegistry.Detect(context.Background())
+		a.reconcileInterruptedRuns()
 		a.resumeCoordinationWatchers()
 		if err := a.manager.Start(context.Background()); err != nil {
 			slog.Debug("automatic Codex connection failed", "error", err)
@@ -116,6 +120,7 @@ type CoordinationMessage struct {
 
 func (a *App) shutdown(_ context.Context) {
 	a.terminals.StopAll()
+	a.interruptLiveRuns("Application closed before the agent reported completion")
 	a.chatMu.Lock()
 	for _, cancel := range a.chatCancels {
 		cancel()
@@ -842,6 +847,107 @@ func (a *App) resumeCoordinationWatchers() {
 	}
 }
 
+func (a *App) reconcileInterruptedRuns() {
+	if a.store == nil {
+		return
+	}
+	tasks, err := a.store.ListTasks(context.Background(), "")
+	if err != nil {
+		return
+	}
+	for _, task := range tasks {
+		runs, runErr := a.store.ListRuns(context.Background(), task.ID)
+		if runErr != nil {
+			continue
+		}
+		interrupted := false
+		for _, run := range runs {
+			if run.Status != "running" {
+				continue
+			}
+			interrupted = true
+			summary := "Interrupted: the application stopped before this agent reported completion"
+			_ = a.store.UpdateRun(context.Background(), run.ID, "interrupted", 0, summary, "")
+			_, _ = a.PostCoordinationMessage(task.ID, run.ID, "interrupted", summary)
+		}
+		if interrupted {
+			_ = a.store.UpdateTaskStatus(context.Background(), task.ID, "interrupted")
+		}
+	}
+	a.emitAgentTasksChanged()
+}
+
+func (a *App) interruptLiveRuns(summary string) {
+	a.runMu.Lock()
+	cancels := make(map[string]context.CancelFunc, len(a.runCancels))
+	for runID, cancel := range a.runCancels {
+		cancels[runID] = cancel
+	}
+	references := make(map[string]runReference, len(a.turnRuns))
+	for turnID, reference := range a.turnRuns {
+		references[turnID] = reference
+	}
+	a.runMu.Unlock()
+	taskIDs := make(map[string]bool)
+	for runID, cancel := range cancels {
+		cancel()
+		if a.store != nil {
+			_ = a.store.UpdateRun(context.Background(), runID, "interrupted", 0, summary, "")
+			tasks, _ := a.store.ListTasks(context.Background(), "")
+			for _, task := range tasks {
+				runs, _ := a.store.ListRuns(context.Background(), task.ID)
+				for _, run := range runs {
+					if run.ID == runID {
+						taskIDs[task.ID] = true
+						break
+					}
+				}
+			}
+		}
+	}
+	for turnID, reference := range references {
+		taskIDs[reference.TaskID] = true
+		if reference.ThreadID != "" {
+			_ = a.InterruptTurn(reference.ThreadID, turnID)
+		}
+		if a.store != nil {
+			_ = a.store.UpdateRun(context.Background(), reference.RunID, "interrupted", 0, summary, "")
+		}
+	}
+	for taskID := range taskIDs {
+		_ = a.store.UpdateTaskStatus(context.Background(), taskID, "interrupted")
+	}
+}
+
+func (a *App) cancelTaskProcesses(taskID string) {
+	runs, _ := a.store.ListRuns(context.Background(), taskID)
+	runIDs := make(map[string]bool, len(runs))
+	for _, run := range runs {
+		runIDs[run.ID] = true
+	}
+	a.runMu.Lock()
+	for runID, cancel := range a.runCancels {
+		if !runIDs[runID] {
+			continue
+		}
+		delete(a.runAttempts, runID)
+		delete(a.runCancels, runID)
+		cancel()
+	}
+	for turnID, reference := range a.turnRuns {
+		if reference.TaskID != taskID {
+			continue
+		}
+		delete(a.turnRuns, turnID)
+		if reference.ThreadID != "" {
+			go func(threadID, activeTurnID string) {
+				_ = a.InterruptTurn(threadID, activeTurnID)
+			}(reference.ThreadID, turnID)
+		}
+	}
+	a.runMu.Unlock()
+}
+
 func (a *App) startCoordinationWatcher(taskID string) {
 	a.coordinationMu.Lock()
 	if _, exists := a.watchers[taskID]; exists {
@@ -982,6 +1088,131 @@ func (a *App) ApproveAgentTaskStage(taskID string) error {
 		}
 	}
 	return errors.New("task has no stage waiting for approval")
+}
+
+func (a *App) ContinueAgentTask(taskID string) error {
+	task, err := a.store.GetTask(context.Background(), taskID)
+	if err != nil {
+		return err
+	}
+	runs, err := a.store.ListRuns(context.Background(), taskID)
+	if err != nil {
+		return err
+	}
+	for _, run := range runs {
+		if run.Status != "interrupted" {
+			continue
+		}
+		if err := a.store.ResetRun(context.Background(), run.ID, "queued",
+			"Continuing from the existing project state after interruption"); err != nil {
+			return err
+		}
+		if err := a.store.UpdateTaskStatus(context.Background(), task.ID, "running"); err != nil {
+			return err
+		}
+		_, _ = a.PostCoordinationMessage(task.ID, run.ID, "resume",
+			"Human requested continuation from the existing project state.")
+		go a.startEligibleRuns(task.ID)
+		a.emitAgentTasksChanged()
+		return nil
+	}
+	return errors.New("task has no interrupted stage to continue")
+}
+
+func (a *App) RetryAgentTaskRun(taskID, runID string) error {
+	task, err := a.store.GetTask(context.Background(), taskID)
+	if err != nil {
+		return err
+	}
+	runs, err := a.store.ListRuns(context.Background(), taskID)
+	if err != nil {
+		return err
+	}
+	for _, run := range runs {
+		if run.ID != runID {
+			continue
+		}
+		if run.Status != "interrupted" && run.Status != "failed" && run.Status != "cancelled" {
+			return fmt.Errorf("stage cannot be retried while it is %s", run.Status)
+		}
+		if err := a.store.ResetRun(context.Background(), run.ID, "queued",
+			"Retry requested; inspect and preserve useful existing work"); err != nil {
+			return err
+		}
+		if err := a.store.UpdateTaskStatus(context.Background(), task.ID, "running"); err != nil {
+			return err
+		}
+		_, _ = a.PostCoordinationMessage(task.ID, run.ID, "retry",
+			"Human requested a new attempt. Inspect existing files before making changes.")
+		go a.startEligibleRuns(task.ID)
+		a.emitAgentTasksChanged()
+		return nil
+	}
+	return errors.New("task stage not found")
+}
+
+func (a *App) CancelAgentTask(taskID string) error {
+	task, err := a.store.GetTask(context.Background(), taskID)
+	if err != nil {
+		return err
+	}
+	runs, err := a.store.ListRuns(context.Background(), taskID)
+	if err != nil {
+		return err
+	}
+	a.cancelTaskProcesses(taskID)
+	for _, run := range runs {
+		switch run.Status {
+		case "completed", "failed", "unavailable", "cancelled":
+			continue
+		default:
+			if err := a.store.UpdateRun(context.Background(), run.ID, "cancelled", 0,
+				"Cancelled by user", ""); err != nil {
+				return err
+			}
+		}
+	}
+	if err := a.store.UpdateTaskStatus(context.Background(), task.ID, "cancelled"); err != nil {
+		return err
+	}
+	_, _ = a.PostCoordinationMessage(task.ID, "", "cancelled", "Workflow cancelled by user.")
+	a.stopCoordinationWatcher(task.ID)
+	a.emitAgentTasksChanged()
+	return nil
+}
+
+func (a *App) RestartAgentTask(taskID string) error {
+	task, err := a.store.GetTask(context.Background(), taskID)
+	if err != nil {
+		return err
+	}
+	runs, err := a.store.ListRuns(context.Background(), taskID)
+	if err != nil {
+		return err
+	}
+	if len(runs) == 0 {
+		return errors.New("task has no stages")
+	}
+	a.cancelTaskProcesses(taskID)
+	for index, run := range runs {
+		status := "queued"
+		if task.Mode == "delivery" && index > 0 {
+			status = "blocked"
+		}
+		if err := a.store.ResetRun(context.Background(), run.ID, status,
+			"Workflow restarted from the first stage; existing project files were preserved"); err != nil {
+			return err
+		}
+	}
+	if err := a.store.UpdateTaskStatus(context.Background(), task.ID, "queued"); err != nil {
+		return err
+	}
+	a.startCoordinationWatcher(task.ID)
+	_, _ = a.PostCoordinationMessage(task.ID, "", "restart",
+		"Workflow restarted from the first stage. Existing project files were preserved.")
+	go a.startEligibleRuns(task.ID)
+	a.emitAgentTasksChanged()
+	return nil
 }
 
 func (a *App) CreateTaskSnapshot(taskID string) (database.Artifact, error) {
@@ -1906,12 +2137,19 @@ func (a *App) startCodexAgentRun(task database.Task, run database.AgentRun) erro
 	}
 	cwd := project.CanonicalPath
 	if task.Mode == "parallel" && project.IsGitRepository {
-		cwd, err = a.createRunWorktree(project, run)
-		if err != nil {
-			return err
+		if run.Worktree != "" {
+			if info, statErr := os.Stat(run.Worktree); statErr == nil && info.IsDir() {
+				cwd = run.Worktree
+			}
 		}
-		if err := a.store.SetRunWorktree(context.Background(), run.ID, cwd); err != nil {
-			return err
+		if cwd == project.CanonicalPath {
+			cwd, err = a.createRunWorktree(project, run)
+			if err != nil {
+				return err
+			}
+			if err := a.store.SetRunWorktree(context.Background(), run.ID, cwd); err != nil {
+				return err
+			}
 		}
 	}
 	coordinationDir := taskCoordinationDir(project.CanonicalPath, task.ID)
@@ -1925,6 +2163,9 @@ func (a *App) startCodexAgentRun(task database.Task, run database.AgentRun) erro
 		filepath.Join(coordinationDir, "MAILBOX.jsonl"),
 		run.ID,
 	)
+	if strings.Contains(run.Summary, "Continuing") || strings.Contains(run.Summary, "Retry") {
+		prompt += "\n\nThis is a resumed attempt. Inspect the existing project files and shared mailbox first. Preserve useful completed work, finish missing work, and report verification evidence."
+	}
 	mode := "default"
 	if run.Role == "planner" {
 		mode = "plan"
@@ -1957,12 +2198,19 @@ func (a *App) startExternalAgentRun(task database.Task, run database.AgentRun) e
 	}
 	cwd := project.CanonicalPath
 	if project.IsGitRepository && (task.Mode == "parallel" || run.Role == "implementer") {
-		cwd, err = a.createRunWorktree(project, run)
-		if err != nil {
-			return err
+		if run.Worktree != "" {
+			if info, statErr := os.Stat(run.Worktree); statErr == nil && info.IsDir() {
+				cwd = run.Worktree
+			}
 		}
-		if err := a.store.SetRunWorktree(context.Background(), run.ID, cwd); err != nil {
-			return err
+		if cwd == project.CanonicalPath {
+			cwd, err = a.createRunWorktree(project, run)
+			if err != nil {
+				return err
+			}
+			if err := a.store.SetRunWorktree(context.Background(), run.ID, cwd); err != nil {
+				return err
+			}
 		}
 	}
 	coordinationDir := taskCoordinationDir(project.CanonicalPath, task.ID)
@@ -1970,6 +2218,9 @@ func (a *App) startExternalAgentRun(task database.Task, run database.AgentRun) e
 		"\n\nShared coordination:\nRead %s and append findings/handoffs as JSONL to %s. Your runId is %s. Re-read the mailbox before finalizing.",
 		filepath.Join(coordinationDir, "TASK.md"), filepath.Join(coordinationDir, "MAILBOX.jsonl"), run.ID,
 	)
+	if strings.Contains(run.Summary, "Continuing") || strings.Contains(run.Summary, "Retry") {
+		prompt += "\n\nThis is a resumed attempt. Inspect the existing project files and shared mailbox first. Preserve useful completed work, finish missing work, and report verification evidence."
+	}
 	args, err := externalAgentArgs(run.ProviderID, run.Role, prompt, coordinationDir)
 	if err != nil {
 		return err
@@ -1977,13 +2228,34 @@ func (a *App) startExternalAgentRun(task database.Task, run database.AgentRun) e
 	if err := a.store.UpdateRun(context.Background(), run.ID, "running", 10, provider.Name+" process started", ""); err != nil {
 		return err
 	}
+	runContext, cancel := context.WithCancel(context.Background())
+	attemptID := newLocalID("attempt")
+	a.runMu.Lock()
+	a.runCancels[run.ID] = cancel
+	a.runAttempts[run.ID] = attemptID
+	a.runMu.Unlock()
 	a.emitAgentTasksChanged()
 	go func() {
-		output, commandErr := commandOutput(context.Background(), cwd, 30*time.Minute, provider.Executable, args...)
+		defer cancel()
+		output, commandErr := commandOutput(runContext, cwd, 30*time.Minute, provider.Executable, args...)
 		status, summary := "completed", provider.Name+" run completed"
 		artifactStatus := "generated"
 		if commandErr != nil {
 			status, summary, artifactStatus = "failed", commandErr.Error(), "failed"
+		}
+		if runContext.Err() != nil {
+			status, summary, artifactStatus = "interrupted",
+				"Agent process was interrupted before reporting completion", "interrupted"
+		}
+		a.runMu.Lock()
+		currentAttempt, active := a.runAttempts[run.ID]
+		if active && currentAttempt == attemptID {
+			delete(a.runAttempts, run.ID)
+			delete(a.runCancels, run.ID)
+		}
+		a.runMu.Unlock()
+		if !active || currentAttempt != attemptID {
+			return
 		}
 		timestamp := time.Now().UTC().Format(time.RFC3339Nano)
 		_ = a.store.CreateArtifact(context.Background(), database.Artifact{
@@ -2069,7 +2341,7 @@ func (a *App) completeAgentRun(turnID, status, summary string) {
 
 func (a *App) finalizeAgentRun(reference runReference, status, summary string) {
 	progress := 100
-	if status == "failed" || status == "cancelled" {
+	if status == "failed" || status == "cancelled" || status == "interrupted" {
 		progress = 0
 	}
 	_ = a.store.UpdateRun(context.Background(), reference.RunID, status, progress, summary, "")
@@ -2082,8 +2354,14 @@ func (a *App) finalizeAgentRun(reference runReference, status, summary string) {
 		return
 	}
 	if task.Mode == "delivery" {
-		if status == "failed" || status == "cancelled" {
-			_ = a.store.UpdateTaskStatus(context.Background(), reference.TaskID, "failed")
+		if status == "failed" || status == "cancelled" || status == "interrupted" {
+			taskStatus := "failed"
+			if status == "cancelled" {
+				taskStatus = "cancelled"
+			} else if status == "interrupted" {
+				taskStatus = "interrupted"
+			}
+			_ = a.store.UpdateTaskStatus(context.Background(), reference.TaskID, taskStatus)
 			a.emitAgentTasksChanged()
 			return
 		}
@@ -2122,14 +2400,15 @@ func (a *App) finalizeAgentRun(reference runReference, status, summary string) {
 	}
 	allTerminal := true
 	for _, run := range runs {
-		if run.Status == "queued" || run.Status == "blocked" || run.Status == "running" {
+		if run.Status == "queued" || run.Status == "blocked" || run.Status == "running" || run.Status == "interrupted" {
 			allTerminal = false
 		}
 	}
 	if allTerminal {
 		taskStatus := "completed"
 		for _, run := range runs {
-			if run.Status == "failed" || run.Status == "cancelled" || run.Status == "unavailable" {
+			if run.Status == "failed" || run.Status == "cancelled" || run.Status == "unavailable" ||
+				run.Status == "interrupted" {
 				taskStatus = "completed-with-findings"
 				break
 			}
