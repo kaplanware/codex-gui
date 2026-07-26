@@ -2406,13 +2406,16 @@ pre {
   display: flex;
   flex-direction: column;
   gap: 9px;
+  min-width: 0;
   min-height: 0;
+  overflow: hidden;
   padding: 15px;
 }
 
 .task-evidence > header {
   display: flex;
   flex: 0 0 auto;
+  min-width: 0;
   justify-content: space-between;
 }
 
@@ -2456,14 +2459,20 @@ pre {
 
 .artifact-tabs {
   display: flex;
+  flex: 0 0 auto;
   gap: 6px;
+  min-width: 0;
+  min-height: 58px;
   overflow-x: auto;
+  overflow-y: hidden;
   padding-bottom: 9px;
 }
 
 .artifact-tabs button {
   display: grid;
   flex: 0 0 auto;
+  min-height: 47px;
+  box-sizing: border-box;
   gap: 2px;
   border: 1px solid var(--border);
   border-radius: 9px;
@@ -2483,9 +2492,13 @@ pre {
 }
 
 .artifact-content {
-  flex: 1 1 auto;
+  width: 100%;
+  max-width: 100%;
+  flex: 1 1 0;
+  box-sizing: border-box;
   min-height: 0;
   overflow: auto;
+  margin: 0;
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 14px;
