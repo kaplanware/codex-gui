@@ -51,6 +51,7 @@ describe('App', () => {
           StopProviderConsole: vi.fn(),
           LogoutProvider: vi.fn(),
           ListAgentTasks: vi.fn().mockResolvedValue([]),
+          ListProjectBranches: vi.fn().mockResolvedValue([]),
           CreateAgentTask: vi.fn(),
           GetTaskChanges: vi.fn().mockResolvedValue({
             taskId: '',
@@ -73,6 +74,8 @@ describe('App', () => {
           RetryAgentTaskRun: vi.fn(),
           CancelAgentTask: vi.fn(),
           RestartAgentTask: vi.fn(),
+          PreviewTaskRollback: vi.fn(),
+          ExecuteTaskRollback: vi.fn(),
           ListCoordinationMessages: vi.fn().mockResolvedValue([]),
           PostCoordinationMessage: vi.fn(),
           LoginWithChatGPT: vi.fn(),

@@ -39,6 +39,7 @@ type App struct {
 	turnRuns       map[string]runReference
 	runCancels     map[string]context.CancelFunc
 	runAttempts    map[string]string
+	runOutputs     map[string]string
 	chatMu         sync.Mutex
 	chatCancels    map[string]context.CancelFunc
 	coordinationMu sync.Mutex
@@ -58,7 +59,8 @@ func NewApp() *App {
 		manager: codex.NewManager(logger), store: store, databaseErr: err, logger: logger,
 		agentRegistry: agents.NewRegistry(), turnRuns: make(map[string]runReference),
 		runCancels: make(map[string]context.CancelFunc), runAttempts: make(map[string]string),
-		watchers: make(map[string]context.CancelFunc), chatCancels: make(map[string]context.CancelFunc),
+		runOutputs: make(map[string]string),
+		watchers:   make(map[string]context.CancelFunc), chatCancels: make(map[string]context.CancelFunc),
 	}
 	if store != nil {
 		app.projects = projects.NewService(store)
@@ -80,6 +82,7 @@ func (a *App) startup(ctx context.Context) {
 	go func() {
 		a.agentRegistry.Detect(context.Background())
 		a.reconcileInterruptedRuns()
+		a.reconcilePlanApprovalGates()
 		a.resumeCoordinationWatchers()
 		if err := a.manager.Start(context.Background()); err != nil {
 			slog.Debug("automatic Codex connection failed", "error", err)
@@ -88,12 +91,24 @@ func (a *App) startup(ctx context.Context) {
 }
 
 type AgentTaskRequest struct {
-	ProjectID string            `json:"projectId"`
-	Title     string            `json:"title"`
-	Prompt    string            `json:"prompt"`
-	Workflow  string            `json:"workflow"`
-	Roles     []string          `json:"roles"`
-	Providers map[string]string `json:"providers"`
+	ProjectID     string            `json:"projectId"`
+	Title         string            `json:"title"`
+	Prompt        string            `json:"prompt"`
+	Workflow      string            `json:"workflow"`
+	Roles         []string          `json:"roles"`
+	Providers     map[string]string `json:"providers"`
+	WorkspaceMode string            `json:"workspaceMode"`
+	BaseBranch    string            `json:"baseBranch"`
+	TaskBranch    string            `json:"taskBranch"`
+	ApprovalMode  string            `json:"approvalMode"`
+	QueueMerge    bool              `json:"queueMerge"`
+	MergeTarget   string            `json:"mergeTarget"`
+	ParentTaskID  string            `json:"parentTaskId"`
+}
+
+type BranchInfo struct {
+	Name    string `json:"name"`
+	Current bool   `json:"current"`
 }
 
 type AgentTaskBundle struct {
@@ -609,6 +624,33 @@ func (a *App) ListAgentTasks(projectID string) ([]AgentTaskBundle, error) {
 	return bundles, nil
 }
 
+func (a *App) ListProjectBranches(projectID string) ([]BranchInfo, error) {
+	project, err := a.projects.Get(context.Background(), projectID)
+	if err != nil {
+		return nil, err
+	}
+	if !project.IsGitRepository {
+		return []BranchInfo{}, nil
+	}
+	current, _ := commandOutput(context.Background(), project.CanonicalPath, 5*time.Second,
+		"git", "branch", "--show-current")
+	output, err := commandOutput(context.Background(), project.CanonicalPath, 5*time.Second,
+		"git", "for-each-ref", "--format=%(refname:short)", "refs/heads")
+	if err != nil {
+		return nil, err
+	}
+	current = strings.TrimSpace(current)
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	branches := make([]BranchInfo, 0, len(lines))
+	for _, name := range lines {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			branches = append(branches, BranchInfo{Name: name, Current: name == current})
+		}
+	}
+	return branches, nil
+}
+
 func (a *App) CreateAgentTask(request AgentTaskRequest) (AgentTaskBundle, error) {
 	if err := a.requireDatabase(); err != nil {
 		return AgentTaskBundle{}, err
@@ -634,11 +676,57 @@ func (a *App) CreateAgentTask(request AgentTaskRequest) (AgentTaskBundle, error)
 	if len(request.Roles) == 0 {
 		request.Roles = []string{"planner", "implementer", "reviewer"}
 	}
+	hasPlanner := false
+	for _, role := range request.Roles {
+		if role == "planner" {
+			hasPlanner = true
+			break
+		}
+	}
+	if !hasPlanner {
+		request.Roles = append([]string{"planner"}, request.Roles...)
+	}
+	if request.ApprovalMode != "auto" {
+		request.ApprovalMode = "manual"
+	}
+	if request.WorkspaceMode == "" {
+		if project.IsGitRepository {
+			request.WorkspaceMode = "new-branch"
+		} else {
+			request.WorkspaceMode = "current"
+		}
+	}
+	if !project.IsGitRepository {
+		request.WorkspaceMode = "current"
+		request.BaseBranch, request.TaskBranch, request.MergeTarget = "", "", ""
+		request.QueueMerge = false
+	}
 	timestamp := time.Now().UTC().Format(time.RFC3339Nano)
+	taskID := newLocalID("task")
+	baseSHA := ""
+	if project.IsGitRepository {
+		if request.BaseBranch == "" {
+			request.BaseBranch = project.DefaultBranch
+		}
+		baseSHA, _ = commandOutput(context.Background(), project.CanonicalPath, 5*time.Second,
+			"git", "rev-parse", request.BaseBranch)
+		baseSHA = strings.TrimSpace(baseSHA)
+	}
 	task := database.Task{
-		ID: newLocalID("task"), ProjectID: request.ProjectID, Title: request.Title,
+		ID: taskID, ProjectID: request.ProjectID, Title: request.Title,
 		Prompt: request.Prompt, Mode: request.Workflow, Status: "queued",
+		WorkspaceMode: request.WorkspaceMode, BaseBranch: request.BaseBranch,
+		TaskBranch: request.TaskBranch, ApprovalMode: request.ApprovalMode,
+		QueueMerge: request.QueueMerge, MergeTarget: request.MergeTarget,
+		ParentTaskID: request.ParentTaskID, BaseGitSHA: baseSHA,
 		CreatedAt: timestamp, UpdatedAt: timestamp,
+	}
+	if task.WorkspaceMode == "new-branch" || task.WorkspaceMode == "existing-branch" {
+		worktree, branch, workspaceErr := a.createTaskWorkspace(project, task)
+		if workspaceErr != nil {
+			return AgentTaskBundle{}, workspaceErr
+		}
+		task.Worktree, task.TaskBranch = worktree, branch
 	}
 	if err := a.store.CreateTask(context.Background(), task); err != nil {
 		return AgentTaskBundle{}, err
@@ -661,7 +749,7 @@ func (a *App) CreateAgentTask(request AgentTaskRequest) (AgentTaskBundle, error)
 			ID: newLocalID("run"), TaskID: task.ID, ProviderID: providerID,
 			Role: role, Position: index, Status: status, Progress: 0,
 		}
-		if request.Workflow == "delivery" && index > 0 && status == "queued" {
+		if index > 0 && status == "queued" {
 			run.Status = "blocked"
 		}
 		if err := a.store.CreateRun(context.Background(), run); err != nil {
@@ -795,6 +883,10 @@ Task ID: %s
 Project: %s
 Workflow: %s
 Status: %s
+Workspace: %s
+Base branch: %s
+Task branch: %s
+Approval: %s
 
 ## Objective
 
@@ -811,7 +903,8 @@ Status: %s
 4. Include a unique id, taskId, runId, role, kind, message, and an ISO-8601 createdAt timestamp.
 5. Re-read the mailbox before finalizing work. Resolve conflicts explicitly.
 6. Put durable outputs in ARTIFACTS.md and reference changed files rather than copying large content.
-`, task.ID, project.CanonicalPath, task.Mode, task.Status, task.Prompt, roles.String())
+`, task.ID, project.CanonicalPath, task.Mode, task.Status, task.WorkspaceMode,
+		task.BaseBranch, task.TaskBranch, task.ApprovalMode, task.Prompt, roles.String())
 	if err := os.WriteFile(filepath.Join(dir, "TASK.md"), []byte(document), 0o600); err != nil {
 		return err
 	}
@@ -873,6 +966,50 @@ func (a *App) reconcileInterruptedRuns() {
 		if interrupted {
 			_ = a.store.UpdateTaskStatus(context.Background(), task.ID, "interrupted")
 		}
+	}
+	a.emitAgentTasksChanged()
+}
+
+func (a *App) reconcilePlanApprovalGates() {
+	if a.store == nil {
+		return
+	}
+	tasks, err := a.store.ListTasks(context.Background(), "")
+	if err != nil {
+		return
+	}
+	for _, task := range tasks {
+		if task.Status == "completed" || task.Status == "cancelled" ||
+			task.Status == "rolled-back" || task.ApprovalMode == "auto" {
+			continue
+		}
+		artifacts, artifactErr := a.store.ListArtifacts(context.Background(), task.ID)
+		if artifactErr != nil {
+			continue
+		}
+		needsApproval := false
+		for _, artifact := range artifacts {
+			if artifact.Type == "plan" && artifact.Status == "needs-review" {
+				needsApproval = true
+				break
+			}
+		}
+		if !needsApproval {
+			continue
+		}
+		runs, runErr := a.store.ListRuns(context.Background(), task.ID)
+		if runErr != nil {
+			continue
+		}
+		for _, run := range runs {
+			if run.Role == "planner" || run.Status == "completed" ||
+				run.Status == "failed" || run.Status == "unavailable" {
+				continue
+			}
+			_ = a.store.ResetRun(context.Background(), run.ID, "blocked",
+				"Waiting for human plan approval")
+		}
+		_ = a.store.UpdateTaskStatus(context.Background(), task.ID, "waiting-approval")
 	}
 	a.emitAgentTasksChanged()
 }
@@ -1072,17 +1209,57 @@ func (a *App) ReviewProjectMemory(id, decision string) error {
 }
 
 func (a *App) ApproveAgentTaskStage(taskID string) error {
+	task, err := a.store.GetTask(context.Background(), taskID)
+	if err != nil {
+		return err
+	}
+	artifacts, err := a.store.ListArtifacts(context.Background(), taskID)
+	if err != nil {
+		return err
+	}
+	planApproved := false
+	for _, artifact := range artifacts {
+		if artifact.Type != "plan" || artifact.Status != "needs-review" {
+			continue
+		}
+		if err := a.store.UpdateArtifactStatus(context.Background(), artifact.ID, "approved"); err != nil {
+			return err
+		}
+		planApproved = true
+	}
 	runs, err := a.store.ListRuns(context.Background(), taskID)
 	if err != nil {
 		return err
 	}
+	approved := false
 	for _, run := range runs {
 		if run.Status == "blocked" {
 			if err := a.store.UpdateRun(context.Background(), run.ID, "queued", 0, "Human approval granted", ""); err != nil {
 				return err
 			}
-			_ = a.store.UpdateTaskStatus(context.Background(), taskID, "running")
-			go a.startEligibleRuns(taskID)
+			approved = true
+			if task.Mode == "delivery" {
+				break
+			}
+		}
+	}
+	if approved {
+		_ = a.store.UpdateTaskStatus(context.Background(), taskID, "running")
+		go a.startEligibleRuns(taskID)
+		a.emitAgentTasksChanged()
+		return nil
+	}
+	if planApproved {
+		allTerminal := true
+		for _, run := range runs {
+			if run.Status != "completed" && run.Status != "failed" &&
+				run.Status != "cancelled" && run.Status != "unavailable" {
+				allTerminal = false
+				break
+			}
+		}
+		if allTerminal {
+			_ = a.store.UpdateTaskStatus(context.Background(), task.ID, "completed")
 			a.emitAgentTasksChanged()
 			return nil
 		}
@@ -1196,7 +1373,7 @@ func (a *App) RestartAgentTask(taskID string) error {
 	a.cancelTaskProcesses(taskID)
 	for index, run := range runs {
 		status := "queued"
-		if task.Mode == "delivery" && index > 0 {
+		if index > 0 {
 			status = "blocked"
 		}
 		if err := a.store.ResetRun(context.Background(), run.ID, status,
@@ -1224,7 +1401,11 @@ func (a *App) CreateTaskSnapshot(taskID string) (database.Artifact, error) {
 	if err != nil {
 		return database.Artifact{}, err
 	}
-	files, err := captureTaskFiles(project.CanonicalPath)
+	snapshotRoot := project.CanonicalPath
+	if task.Worktree != "" {
+		snapshotRoot = task.Worktree
+	}
+	files, err := captureTaskFiles(snapshotRoot)
 	if err != nil {
 		return database.Artifact{}, fmt.Errorf("capture project files: %w", err)
 	}
@@ -1237,12 +1418,12 @@ func (a *App) CreateTaskSnapshot(taskID string) (database.Artifact, error) {
 		}
 	}
 	payload := taskSnapshotPayload{
-		Project: project.CanonicalPath, CapturedAt: time.Now().UTC(), Baseline: isBaseline, Files: files,
+		Project: snapshotRoot, CapturedAt: time.Now().UTC(), Baseline: isBaseline, Files: files,
 	}
 	if project.IsGitRepository {
-		head, _ := commandOutput(context.Background(), project.CanonicalPath, 5*time.Second, "git", "rev-parse", "HEAD")
-		status, _ := commandOutput(context.Background(), project.CanonicalPath, 5*time.Second, "git", "status", "--porcelain=v1")
-		diff, _ := commandOutput(context.Background(), project.CanonicalPath, 10*time.Second, "git", "diff", "--binary")
+		head, _ := commandOutput(context.Background(), snapshotRoot, 5*time.Second, "git", "rev-parse", "HEAD")
+		status, _ := commandOutput(context.Background(), snapshotRoot, 5*time.Second, "git", "status", "--porcelain=v1")
+		diff, _ := commandOutput(context.Background(), snapshotRoot, 10*time.Second, "git", "diff", "--binary")
 		payload.GitSHA = strings.TrimSpace(head)
 		payload.DirtyState = strings.Split(strings.TrimSpace(status), "\n")
 		payload.Diff = diff
@@ -1288,8 +1469,14 @@ func (a *App) GetTaskChanges(taskID string) (TaskChanges, error) {
 	type workspaceRoot struct {
 		path, label, runID string
 	}
-	roots := []workspaceRoot{{path: project.CanonicalPath, label: "Project workspace"}}
-	seenRoots := map[string]bool{project.CanonicalPath: true}
+	primaryRoot := project.CanonicalPath
+	primaryLabel := "Project workspace"
+	if task.Worktree != "" {
+		primaryRoot = task.Worktree
+		primaryLabel = task.TaskBranch + " · task worktree"
+	}
+	roots := []workspaceRoot{{path: primaryRoot, label: primaryLabel}}
+	seenRoots := map[string]bool{primaryRoot: true}
 	for _, run := range runs {
 		if run.Worktree == "" || seenRoots[run.Worktree] {
 			continue
@@ -1498,6 +1685,16 @@ func truncate(value string, limit int) string {
 		return value
 	}
 	return value[:limit] + "\n…truncated"
+}
+
+func extractAgentResult(output string) string {
+	var payload struct {
+		Result string `json:"result"`
+	}
+	if json.Unmarshal([]byte(output), &payload) == nil && strings.TrimSpace(payload.Result) != "" {
+		return payload.Result
+	}
+	return output
 }
 
 func (a *App) LoginWithChatGPT() (LoginStart, error) {
@@ -2230,7 +2427,14 @@ func (a *App) startCodexAgentRun(task database.Task, run database.AgentRun) erro
 		return err
 	}
 	cwd := project.CanonicalPath
-	if task.Mode == "parallel" && project.IsGitRepository {
+	if task.Worktree != "" {
+		if info, statErr := os.Stat(task.Worktree); statErr == nil && info.IsDir() {
+			cwd = task.Worktree
+			_ = a.store.SetRunWorktree(context.Background(), run.ID, cwd)
+		} else {
+			return fmt.Errorf("task worktree is unavailable: %s", task.Worktree)
+		}
+	} else if task.Mode == "parallel" && project.IsGitRepository {
 		if run.Worktree != "" {
 			if info, statErr := os.Stat(run.Worktree); statErr == nil && info.IsDir() {
 				cwd = run.Worktree
@@ -2291,7 +2495,14 @@ func (a *App) startExternalAgentRun(task database.Task, run database.AgentRun) e
 		return errors.New("provider execution adapter is not available")
 	}
 	cwd := project.CanonicalPath
-	if project.IsGitRepository && (task.Mode == "parallel" || run.Role == "implementer") {
+	if task.Worktree != "" {
+		if info, statErr := os.Stat(task.Worktree); statErr == nil && info.IsDir() {
+			cwd = task.Worktree
+			_ = a.store.SetRunWorktree(context.Background(), run.ID, cwd)
+		} else {
+			return fmt.Errorf("task worktree is unavailable: %s", task.Worktree)
+		}
+	} else if project.IsGitRepository && (task.Mode == "parallel" || run.Role == "implementer") {
 		if run.Worktree != "" {
 			if info, statErr := os.Stat(run.Worktree); statErr == nil && info.IsDir() {
 				cwd = run.Worktree
@@ -2396,6 +2607,86 @@ func externalAgentArgs(providerID, role, prompt, coordinationDir string) ([]stri
 	}
 }
 
+func (a *App) createTaskWorkspace(
+	project database.Project,
+	task database.Task,
+) (string, string, error) {
+	root, err := agentWorktreeRoot(project.ID)
+	if err != nil {
+		return "", "", err
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return "", "", err
+	}
+	target := filepath.Join(root, task.ID)
+	branch := strings.TrimSpace(task.TaskBranch)
+	args := []string{"worktree", "add"}
+	switch task.WorkspaceMode {
+	case "existing-branch":
+		if branch == "" {
+			return "", "", errors.New("select an existing branch for this task")
+		}
+		args = append(args, target, branch)
+	case "new-branch":
+		if branch == "" {
+			branch = "agent/" + taskBranchSlug(task.Title) + "-" + shortLocalID(task.ID)
+		}
+		if _, checkErr := commandOutput(context.Background(), project.CanonicalPath, 5*time.Second,
+			"git", "check-ref-format", "--branch", branch); checkErr != nil {
+			return "", "", fmt.Errorf("invalid task branch %q", branch)
+		}
+		base := task.BaseBranch
+		if base == "" {
+			base = "HEAD"
+		}
+		args = append(args, "-b", branch, target, base)
+	default:
+		return project.CanonicalPath, task.TaskBranch, nil
+	}
+	output, err := commandOutput(context.Background(), project.CanonicalPath, 30*time.Second,
+		"git", args...)
+	if err != nil {
+		return "", "", fmt.Errorf("create task worktree: %w: %s", err, output)
+	}
+	_, _ = commandOutput(context.Background(), project.CanonicalPath, 5*time.Second,
+		"git", "config", "rerere.enabled", "true")
+	return target, branch, nil
+}
+
+func taskBranchSlug(value string) string {
+	var slug strings.Builder
+	lastDash := false
+	for _, character := range strings.ToLower(value) {
+		isAlphaNumeric := character >= 'a' && character <= 'z' ||
+			character >= '0' && character <= '9'
+		if isAlphaNumeric {
+			slug.WriteRune(character)
+			lastDash = false
+		} else if slug.Len() > 0 && !lastDash {
+			slug.WriteByte('-')
+			lastDash = true
+		}
+		if slug.Len() >= 36 {
+			break
+		}
+	}
+	result := strings.Trim(slug.String(), "-")
+	if result == "" {
+		return "task"
+	}
+	return result
+}
+
+func shortLocalID(value string) string {
+	if index := strings.LastIndex(value, "-"); index >= 0 && index+1 < len(value) {
+		value = value[index+1:]
+	}
+	if len(value) > 8 {
+		return value[len(value)-8:]
+	}
+	return value
+}
+
 func (a *App) createRunWorktree(project database.Project, run database.AgentRun) (string, error) {
 	root, err := agentWorktreeRoot(project.ID)
 	if err != nil {
@@ -2417,12 +2708,22 @@ func (a *App) createRunWorktree(project database.Project, run database.AgentRun)
 func (a *App) completeAgentRun(turnID, status, summary string) {
 	a.runMu.Lock()
 	reference, ok := a.turnRuns[turnID]
+	output := a.runOutputs[turnID]
 	if ok {
 		delete(a.turnRuns, turnID)
 	}
+	delete(a.runOutputs, turnID)
 	a.runMu.Unlock()
 	if !ok {
 		return
+	}
+	if strings.TrimSpace(output) != "" {
+		timestamp := time.Now().UTC().Format(time.RFC3339Nano)
+		_ = a.store.CreateArtifact(context.Background(), database.Artifact{
+			ID: newLocalID("agent-output"), TaskID: reference.TaskID, RunID: reference.RunID,
+			Type: "agent-output", Title: "Codex · agent output", Status: "generated",
+			Content: strings.TrimSpace(output), CreatedAt: timestamp, UpdatedAt: timestamp,
+		})
 	}
 	if status == "" {
 		status = "completed"
@@ -2447,6 +2748,78 @@ func (a *App) finalizeAgentRun(reference runReference, status, summary string) {
 	if err != nil {
 		return
 	}
+	var completedRun database.AgentRun
+	for _, run := range runs {
+		if run.ID == reference.RunID {
+			completedRun = run
+			break
+		}
+	}
+	if completedRun.Role == "planner" {
+		if status == "failed" || status == "cancelled" || status == "interrupted" {
+			taskStatus := "failed"
+			if status == "cancelled" {
+				taskStatus = "cancelled"
+			} else if status == "interrupted" {
+				taskStatus = "interrupted"
+			}
+			_ = a.store.UpdateTaskStatus(context.Background(), reference.TaskID, taskStatus)
+			a.emitAgentTasksChanged()
+			return
+		}
+		timestamp := time.Now().UTC().Format(time.RFC3339Nano)
+		planContent := "Open the planner thread to review the complete plan, then approve the next workflow stage."
+		if artifacts, artifactErr := a.store.ListArtifacts(context.Background(), reference.TaskID); artifactErr == nil {
+			for _, artifact := range artifacts {
+				if artifact.RunID == reference.RunID && artifact.Type == "agent-output" &&
+					strings.TrimSpace(artifact.Content) != "" {
+					planContent = extractAgentResult(artifact.Content)
+					break
+				}
+			}
+		}
+		planStatus := "needs-review"
+		if task.ApprovalMode == "auto" {
+			planStatus = "approved"
+		}
+		_ = a.store.CreateArtifact(context.Background(), database.Artifact{
+			ID: newLocalID("plan"), TaskID: reference.TaskID, RunID: reference.RunID,
+			Type: "plan", Title: "Implementation plan", Status: planStatus,
+			Content: planContent, CreatedAt: timestamp, UpdatedAt: timestamp,
+		})
+		if task.ApprovalMode != "auto" {
+			a.cancelTaskProcesses(reference.TaskID)
+			for _, run := range runs {
+				if run.ID == reference.RunID || run.Status == "completed" ||
+					run.Status == "failed" || run.Status == "unavailable" {
+					continue
+				}
+				_ = a.store.ResetRun(context.Background(), run.ID, "blocked",
+					"Waiting for human plan approval")
+			}
+			_ = a.store.UpdateTaskStatus(context.Background(), reference.TaskID, "waiting-approval")
+			a.emitAgentTasksChanged()
+			return
+		}
+		queued := false
+		for _, run := range runs {
+			if run.Status != "blocked" {
+				continue
+			}
+			_ = a.store.UpdateRun(context.Background(), run.ID, "queued", 0,
+				"Plan automatically approved", "")
+			queued = true
+			if task.Mode == "delivery" {
+				break
+			}
+		}
+		if queued {
+			_ = a.store.UpdateTaskStatus(context.Background(), reference.TaskID, "running")
+			go a.startEligibleRuns(reference.TaskID)
+			a.emitAgentTasksChanged()
+			return
+		}
+	}
 	if task.Mode == "delivery" {
 		if status == "failed" || status == "cancelled" || status == "interrupted" {
 			taskStatus := "failed"
@@ -2460,32 +2833,9 @@ func (a *App) finalizeAgentRun(reference runReference, status, summary string) {
 			return
 		}
 		for _, run := range runs {
-			if run.ID == reference.RunID && run.Role == "planner" {
-				_ = a.store.UpdateTaskStatus(context.Background(), reference.TaskID, "waiting-approval")
-				timestamp := time.Now().UTC().Format(time.RFC3339Nano)
-				planContent := "Open the planner thread to review the complete plan, then approve the next workflow stage."
-				if artifacts, artifactErr := a.store.ListArtifacts(context.Background(), reference.TaskID); artifactErr == nil {
-					for _, artifact := range artifacts {
-						if artifact.RunID == reference.RunID && artifact.Type == "agent-output" &&
-							strings.TrimSpace(artifact.Content) != "" {
-							planContent = artifact.Content
-							break
-						}
-					}
-				}
-				_ = a.store.CreateArtifact(context.Background(), database.Artifact{
-					ID: newLocalID("plan"), TaskID: reference.TaskID, RunID: reference.RunID,
-					Type: "plan", Title: "Implementation plan", Status: "needs-review",
-					Content:   planContent,
-					CreatedAt: timestamp, UpdatedAt: timestamp,
-				})
-				a.emitAgentTasksChanged()
-				return
-			}
-		}
-		for _, run := range runs {
 			if run.Status == "blocked" {
-				_ = a.store.UpdateRun(context.Background(), run.ID, "queued", 0, "Previous workflow stage completed", "")
+				_ = a.store.UpdateRun(context.Background(), run.ID, "queued", 0,
+					"Previous workflow stage completed", "")
 				go a.startEligibleRuns(reference.TaskID)
 				a.emitAgentTasksChanged()
 				return
@@ -2516,7 +2866,86 @@ func (a *App) finalizeAgentRun(reference runReference, status, summary string) {
 			Content:   "All configured agent runs reached a terminal state. Review each provider thread and verification evidence before merge.",
 			CreatedAt: timestamp, UpdatedAt: timestamp,
 		})
+		if taskStatus == "completed" && task.QueueMerge && task.TaskBranch != "" &&
+			task.MergeTarget != "" {
+			go a.queueTaskMerge(task)
+		}
 	}
+	a.emitAgentTasksChanged()
+}
+
+func (a *App) queueTaskMerge(task database.Task) {
+	project, err := a.projects.Get(context.Background(), task.ProjectID)
+	if err != nil {
+		return
+	}
+	if task.Worktree == "" {
+		return
+	}
+	status, statusErr := commandOutput(context.Background(), task.Worktree, 10*time.Second,
+		"git", "status", "--porcelain=v1")
+	if statusErr != nil {
+		return
+	}
+	if strings.TrimSpace(status) != "" {
+		if output, addErr := commandOutput(context.Background(), task.Worktree, 30*time.Second,
+			"git", "add", "-A"); addErr != nil {
+			a.createMergeQueueFailureArtifact(task, "Stage task changes", output, addErr)
+			return
+		}
+		message := "agent task: " + task.Title
+		if output, commitErr := commandOutput(context.Background(), task.Worktree, 30*time.Second,
+			"git", "-c", "user.name=Agent Workspace", "-c",
+			"user.email=agent-workspace@local", "commit", "-m", message); commitErr != nil {
+			a.createMergeQueueFailureArtifact(task, "Commit task changes", output, commitErr)
+			return
+		}
+	}
+	prompt := fmt.Sprintf(`Prepare an approval-gated merge candidate.
+
+Source task: %s
+Source branch: %s
+Target branch: %s
+
+First inspect the prospective merge with git merge-tree and produce a conflict-aware plan. After approval, merge %s into this isolated staging branch. If conflicts occur, use Git rerere when it has a recorded resolution, otherwise resolve each conflict deliberately, explain the chosen semantics, run relevant tests, and leave a reviewable diff and commit history. Never update the target branch directly and never force-push.`, task.Title, task.TaskBranch, task.MergeTarget, task.TaskBranch)
+	mergePreview, mergePreviewErr := commandOutput(context.Background(), project.CanonicalPath,
+		30*time.Second, "git", "merge-tree", "--write-tree", task.MergeTarget, task.TaskBranch)
+	mergeBundle, createErr := a.CreateAgentTask(AgentTaskRequest{
+		ProjectID: task.ProjectID, Title: "Merge " + task.TaskBranch + " → " + task.MergeTarget,
+		Prompt: prompt, Workflow: "delivery",
+		Roles: []string{"planner", "implementer", "reviewer"},
+		Providers: map[string]string{
+			"planner": "auto", "implementer": "auto", "reviewer": "auto",
+		},
+		WorkspaceMode: "new-branch", BaseBranch: task.MergeTarget,
+		TaskBranch:   "merge/" + taskBranchSlug(task.Title) + "-" + shortLocalID(task.ID),
+		ApprovalMode: "manual", ParentTaskID: task.ID,
+	})
+	if createErr != nil {
+		a.createMergeQueueFailureArtifact(task, "Create merge task", "", createErr)
+		return
+	}
+	timestamp := time.Now().UTC().Format(time.RFC3339Nano)
+	previewStatus := "clean"
+	if mergePreviewErr != nil {
+		previewStatus = "needs-resolution"
+	}
+	_ = a.store.CreateArtifact(context.Background(), database.Artifact{
+		ID: newLocalID("merge-preview"), TaskID: mergeBundle.Task.ID, Type: "merge-preview",
+		Title: "Git merge-tree preflight", Status: previewStatus,
+		Content: strings.TrimSpace(mergePreview), CreatedAt: timestamp, UpdatedAt: timestamp,
+	})
+	_, _ = a.PostCoordinationMessage(task.ID, "", "merge-queued",
+		"Created an approval-gated merge task targeting "+task.MergeTarget+".")
+}
+
+func (a *App) createMergeQueueFailureArtifact(task database.Task, title, output string, err error) {
+	timestamp := time.Now().UTC().Format(time.RFC3339Nano)
+	_ = a.store.CreateArtifact(context.Background(), database.Artifact{
+		ID: newLocalID("merge-queue"), TaskID: task.ID, Type: "merge",
+		Title: title, Status: "failed", Content: strings.TrimSpace(output + "\n" + err.Error()),
+		CreatedAt: timestamp, UpdatedAt: timestamp,
+	})
 	a.emitAgentTasksChanged()
 }
 
@@ -2641,6 +3070,18 @@ func (a *App) handleProtocolMessage(method string, id, params []byte) {
 			go a.completeAgentRun(turnID, runStatus, summary)
 		}
 	case "item/started", "item/updated", "item/completed":
+		if method == "item/completed" && nestedString(payload, "item", "type") == "agentMessage" {
+			turnID := nestedString(payload, "turnId")
+			text := nestedString(payload, "item", "text")
+			if turnID != "" && text != "" {
+				a.runMu.Lock()
+				if a.runOutputs[turnID] != "" {
+					a.runOutputs[turnID] += "\n\n"
+				}
+				a.runOutputs[turnID] += text
+				a.runMu.Unlock()
+			}
+		}
 		emit("codex:item", map[string]any{"event": method, "payload": payload})
 	case "item/agentMessage/delta":
 		emit("codex:agent-message-delta", payload)

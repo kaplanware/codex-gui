@@ -45,14 +45,24 @@ type ChatMessage struct {
 }
 
 type Task struct {
-	ID        string `json:"id"`
-	ProjectID string `json:"projectId"`
-	Title     string `json:"title"`
-	Prompt    string `json:"prompt"`
-	Mode      string `json:"mode"`
-	Status    string `json:"status"`
-	CreatedAt string `json:"createdAt"`
-	UpdatedAt string `json:"updatedAt"`
+	ID             string `json:"id"`
+	ProjectID      string `json:"projectId"`
+	Title          string `json:"title"`
+	Prompt         string `json:"prompt"`
+	Mode           string `json:"mode"`
+	Status         string `json:"status"`
+	WorkspaceMode  string `json:"workspaceMode"`
+	BaseBranch     string `json:"baseBranch,omitempty"`
+	TaskBranch     string `json:"taskBranch,omitempty"`
+	Worktree       string `json:"worktree,omitempty"`
+	ApprovalMode   string `json:"approvalMode"`
+	MergeTarget    string `json:"mergeTarget,omitempty"`
+	QueueMerge     bool   `json:"queueMerge"`
+	ParentTaskID   string `json:"parentTaskId,omitempty"`
+	BaseGitSHA     string `json:"baseGitSha,omitempty"`
+	RollbackStatus string `json:"rollbackStatus,omitempty"`
+	CreatedAt      string `json:"createdAt"`
+	UpdatedAt      string `json:"updatedAt"`
 }
 
 type AgentRun struct {
@@ -171,6 +181,10 @@ func (s *Store) migrate(ctx context.Context) error {
 		CREATE TABLE IF NOT EXISTS agent_tasks (
 			id TEXT PRIMARY KEY, project_id TEXT NOT NULL, title TEXT NOT NULL,
 			prompt TEXT NOT NULL, mode TEXT NOT NULL, status TEXT NOT NULL,
+			workspace_mode TEXT NOT NULL DEFAULT 'current', base_branch TEXT,
+			task_branch TEXT, worktree TEXT, approval_mode TEXT NOT NULL DEFAULT 'manual',
+			merge_target TEXT, queue_merge INTEGER NOT NULL DEFAULT 0,
+			parent_task_id TEXT, base_git_sha TEXT, rollback_status TEXT,
 			created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
 			FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 		);
@@ -209,6 +223,21 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err == nil {
 		_, _ = s.db.ExecContext(ctx, `ALTER TABLE threads ADD COLUMN provider_id TEXT NOT NULL DEFAULT 'codex'`)
 		_, _ = s.db.ExecContext(ctx, `ALTER TABLE threads ADD COLUMN model TEXT NOT NULL DEFAULT ''`)
+		taskColumns := []string{
+			`ALTER TABLE agent_tasks ADD COLUMN workspace_mode TEXT NOT NULL DEFAULT 'current'`,
+			`ALTER TABLE agent_tasks ADD COLUMN base_branch TEXT`,
+			`ALTER TABLE agent_tasks ADD COLUMN task_branch TEXT`,
+			`ALTER TABLE agent_tasks ADD COLUMN worktree TEXT`,
+			`ALTER TABLE agent_tasks ADD COLUMN approval_mode TEXT NOT NULL DEFAULT 'manual'`,
+			`ALTER TABLE agent_tasks ADD COLUMN merge_target TEXT`,
+			`ALTER TABLE agent_tasks ADD COLUMN queue_merge INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE agent_tasks ADD COLUMN parent_task_id TEXT`,
+			`ALTER TABLE agent_tasks ADD COLUMN base_git_sha TEXT`,
+			`ALTER TABLE agent_tasks ADD COLUMN rollback_status TEXT`,
+		}
+		for _, statement := range taskColumns {
+			_, _ = s.db.ExecContext(ctx, statement)
+		}
 	}
 	return err
 }
@@ -241,14 +270,24 @@ func (s *Store) ListChatMessages(ctx context.Context, threadID string) ([]ChatMe
 
 func (s *Store) CreateTask(ctx context.Context, task Task) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO agent_tasks
-		(id, project_id, title, prompt, mode, status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		task.ID, task.ProjectID, task.Title, task.Prompt, task.Mode, task.Status, task.CreatedAt, task.UpdatedAt)
+		(id, project_id, title, prompt, mode, status, workspace_mode, base_branch, task_branch,
+		worktree, approval_mode, merge_target, queue_merge, parent_task_id, base_git_sha,
+		rollback_status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		task.ID, task.ProjectID, task.Title, task.Prompt, task.Mode, task.Status,
+		task.WorkspaceMode, nullIfEmpty(task.BaseBranch), nullIfEmpty(task.TaskBranch),
+		nullIfEmpty(task.Worktree), task.ApprovalMode, nullIfEmpty(task.MergeTarget), task.QueueMerge,
+		nullIfEmpty(task.ParentTaskID), nullIfEmpty(task.BaseGitSHA), nullIfEmpty(task.RollbackStatus),
+		task.CreatedAt, task.UpdatedAt)
 	return err
 }
 
 func (s *Store) ListTasks(ctx context.Context, projectID string) ([]Task, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, project_id, title, prompt, mode, status, created_at, updated_at
+	rows, err := s.db.QueryContext(ctx, `SELECT id, project_id, title, prompt, mode, status,
+		COALESCE(workspace_mode,'current'), COALESCE(base_branch,''), COALESCE(task_branch,''),
+		COALESCE(worktree,''), COALESCE(approval_mode,'manual'), COALESCE(merge_target,''),
+		COALESCE(queue_merge,0), COALESCE(parent_task_id,''), COALESCE(base_git_sha,''),
+		COALESCE(rollback_status,''), created_at, updated_at
 		FROM agent_tasks WHERE (? = '' OR project_id = ?) ORDER BY updated_at DESC`, projectID, projectID)
 	if err != nil {
 		return nil, err
@@ -257,7 +296,10 @@ func (s *Store) ListTasks(ctx context.Context, projectID string) ([]Task, error)
 	var tasks []Task
 	for rows.Next() {
 		var task Task
-		if err := rows.Scan(&task.ID, &task.ProjectID, &task.Title, &task.Prompt, &task.Mode, &task.Status, &task.CreatedAt, &task.UpdatedAt); err != nil {
+		if err := rows.Scan(&task.ID, &task.ProjectID, &task.Title, &task.Prompt, &task.Mode,
+			&task.Status, &task.WorkspaceMode, &task.BaseBranch, &task.TaskBranch, &task.Worktree,
+			&task.ApprovalMode, &task.MergeTarget, &task.QueueMerge, &task.ParentTaskID,
+			&task.BaseGitSHA, &task.RollbackStatus, &task.CreatedAt, &task.UpdatedAt); err != nil {
 			return nil, err
 		}
 		tasks = append(tasks, task)
@@ -267,14 +309,28 @@ func (s *Store) ListTasks(ctx context.Context, projectID string) ([]Task, error)
 
 func (s *Store) GetTask(ctx context.Context, id string) (Task, error) {
 	var task Task
-	err := s.db.QueryRowContext(ctx, `SELECT id, project_id, title, prompt, mode, status, created_at, updated_at
+	err := s.db.QueryRowContext(ctx, `SELECT id, project_id, title, prompt, mode, status,
+		COALESCE(workspace_mode,'current'), COALESCE(base_branch,''), COALESCE(task_branch,''),
+		COALESCE(worktree,''), COALESCE(approval_mode,'manual'), COALESCE(merge_target,''),
+		COALESCE(queue_merge,0), COALESCE(parent_task_id,''), COALESCE(base_git_sha,''),
+		COALESCE(rollback_status,''), created_at, updated_at
 		FROM agent_tasks WHERE id = ?`, id).Scan(&task.ID, &task.ProjectID, &task.Title,
-		&task.Prompt, &task.Mode, &task.Status, &task.CreatedAt, &task.UpdatedAt)
+		&task.Prompt, &task.Mode, &task.Status, &task.WorkspaceMode, &task.BaseBranch,
+		&task.TaskBranch, &task.Worktree, &task.ApprovalMode, &task.MergeTarget,
+		&task.QueueMerge, &task.ParentTaskID, &task.BaseGitSHA, &task.RollbackStatus,
+		&task.CreatedAt, &task.UpdatedAt)
 	return task, err
 }
 
 func (s *Store) UpdateTaskStatus(ctx context.Context, id, status string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE agent_tasks SET status = ?, updated_at = ? WHERE id = ?`, status, now(), id)
+	return err
+}
+
+func (s *Store) UpdateTaskRollbackStatus(ctx context.Context, id, taskStatus, rollbackStatus string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE agent_tasks
+		SET status = ?, rollback_status = ?, updated_at = ? WHERE id = ?`,
+		taskStatus, rollbackStatus, now(), id)
 	return err
 }
 
@@ -351,6 +407,14 @@ func (s *Store) CreateArtifact(ctx context.Context, artifact Artifact) error {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		artifact.ID, artifact.TaskID, nullIfEmpty(artifact.RunID), artifact.Type, artifact.Title,
 		artifact.Status, artifact.Content, artifact.CreatedAt, artifact.UpdatedAt)
+	return err
+}
+
+func (s *Store) UpdateArtifactStatus(ctx context.Context, id, status string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE artifacts SET status = ?, updated_at = ? WHERE id = ?`,
+		status, time.Now().UTC().Format(time.RFC3339Nano), id,
+	)
 	return err
 }
 

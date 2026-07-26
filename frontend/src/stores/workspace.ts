@@ -7,6 +7,7 @@ import type {
   AgentTaskBundle,
   AgentTaskRequest,
   Approval,
+  BranchInfo,
   ConversationItem,
   ContextEntry,
   CoordinationMessage,
@@ -20,6 +21,7 @@ import type {
   ProviderModel,
   ProviderUsage,
   RateLimits,
+  RollbackPreview,
   TaskChanges,
   Thread,
   TurnOptions,
@@ -58,7 +60,9 @@ export const useWorkspaceStore = defineStore('workspace', {
     providerUsage: [] as ProviderUsage[],
     selectedProvider: 'codex',
     agentTasks: [] as AgentTaskBundle[],
+    projectBranches: [] as BranchInfo[],
     taskChangesByTask: {} as Record<string, TaskChanges>,
+    rollbackPreview: null as RollbackPreview | null,
     preflight: [] as PreflightCheck[],
     contextEntries: [] as ContextEntry[],
     projectMemory: [] as ProjectMemory[],
@@ -274,14 +278,18 @@ export const useWorkspaceStore = defineStore('workspace', {
         this.agentProviders = providers
         this.agentTasks = tasks
         if (projectId) {
-          const [preflight, contextEntries, projectMemory] = await Promise.all([
+          const [preflight, contextEntries, projectMemory, branches] = await Promise.all([
             backend.preflightProject(projectId),
             backend.inspectProjectContext(projectId),
             backend.listProjectMemory(projectId),
+            backend.listProjectBranches(projectId),
           ])
           this.preflight = preflight
           this.contextEntries = contextEntries
           this.projectMemory = projectMemory
+          this.projectBranches = branches
+        } else {
+          this.projectBranches = []
         }
       } catch (error) {
         this.error = message(error)
@@ -366,6 +374,18 @@ export const useWorkspaceStore = defineStore('workspace', {
       await this.run(async () => {
         await backend.restartAgentTask(taskId)
         await this.loadAgentTasks()
+      })
+    },
+    async previewRollback(taskId: string) {
+      await this.run(async () => {
+        this.rollbackPreview = await backend.previewTaskRollback(taskId)
+      })
+    },
+    async executeRollback(taskId: string, confirmation: string) {
+      await this.run(async () => {
+        this.rollbackPreview = await backend.executeTaskRollback(taskId, confirmation)
+        await this.loadAgentTasks()
+        await this.loadTaskChanges(taskId)
       })
     },
     async loadCoordination(taskId: string) {

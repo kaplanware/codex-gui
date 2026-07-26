@@ -260,6 +260,16 @@ export interface AgentTask {
   prompt: string
   mode: string
   status: string
+  workspaceMode: string
+  baseBranch?: string
+  taskBranch?: string
+  worktree?: string
+  approvalMode: string
+  mergeTarget?: string
+  queueMerge: boolean
+  parentTaskId?: string
+  baseGitSha?: string
+  rollbackStatus?: string
   createdAt: string
   updatedAt: string
 }
@@ -315,6 +325,24 @@ export interface TaskChanges {
   changes: TaskFileChange[]
 }
 
+export interface RollbackTaskImpact {
+  taskId: string
+  title: string
+  status: string
+  branch?: string
+  workspace: string
+  changeCount: number
+  canRollback: boolean
+  blockReason?: string
+}
+
+export interface RollbackPreview {
+  taskId: string
+  canRollback: boolean
+  warning: string
+  tasks: RollbackTaskImpact[]
+}
+
 export interface AgentTaskRequest {
   projectId: string
   title: string
@@ -322,6 +350,18 @@ export interface AgentTaskRequest {
   workflow: 'delivery' | 'parallel'
   roles: string[]
   providers: Record<string, string>
+  workspaceMode: 'current' | 'new-branch' | 'existing-branch'
+  baseBranch: string
+  taskBranch: string
+  approvalMode: 'manual' | 'auto'
+  queueMerge: boolean
+  mergeTarget: string
+  parentTaskId: string
+}
+
+export interface BranchInfo {
+  name: string
+  current: boolean
 }
 
 export interface PreflightCheck {

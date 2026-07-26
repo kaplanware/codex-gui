@@ -21,6 +21,13 @@ const currentView = ref<'chat' | 'agents' | 'settings'>('chat')
 const taskTitle = ref('')
 const taskPrompt = ref('')
 const taskWorkflow = ref<'delivery' | 'parallel'>('delivery')
+const taskWorkspaceMode = ref<'current' | 'new-branch' | 'existing-branch'>('new-branch')
+const taskBaseBranch = ref('')
+const taskBranch = ref('')
+const taskApprovalMode = ref<'manual' | 'auto'>('manual')
+const taskQueueMerge = ref(false)
+const taskMergeTarget = ref('')
+const taskParentId = ref('')
 const taskDetailTabs = ['evidence', 'changes', 'activity'] as const
 const selectedRoles = ref(['planner', 'implementer', 'reviewer'])
 const roleProviders = ref<Record<string, string>>({})
@@ -32,6 +39,9 @@ const selectedTaskId = ref('')
 const selectedArtifactId = ref('')
 const selectedTaskTab = ref<'evidence' | 'changes' | 'activity'>('evidence')
 const selectedChangePath = ref('')
+const objectiveExpanded = ref(false)
+const rollbackTaskId = ref('')
+const rollbackConfirmation = ref('')
 const setupProvider = ref<AgentProvider | null>(null)
 const consoleProvider = ref<AgentProvider | null>(null)
 const consoleElement = ref<HTMLElement | null>(null)
@@ -107,6 +117,27 @@ watch(
     showAgentMenu.value = false
     showModelMenu.value = false
   },
+)
+
+watch(
+  () => workspace.projectBranches.map((branch) => `${branch.name}:${branch.current}`).join('|'),
+  () => {
+    const current =
+      workspace.projectBranches.find((branch) => branch.current)?.name ??
+      workspace.projectBranches[0]?.name ??
+      ''
+    if (!taskBaseBranch.value || !workspace.projectBranches.some((branch) => branch.name === taskBaseBranch.value)) {
+      taskBaseBranch.value = current
+    }
+    if (!taskMergeTarget.value || !workspace.projectBranches.some((branch) => branch.name === taskMergeTarget.value)) {
+      taskMergeTarget.value = current
+    }
+    if (!workspace.activeProject?.isGitRepository) {
+      taskWorkspaceMode.value = 'current'
+      taskQueueMerge.value = false
+    }
+  },
+  { immediate: true },
 )
 
 watch(
@@ -205,6 +236,7 @@ async function openMissionControl() {
 }
 
 function toggleRole(role: string) {
+  if (role === 'planner') return
   selectedRoles.value = selectedRoles.value.includes(role)
     ? selectedRoles.value.filter((candidate) => candidate !== role)
     : [...selectedRoles.value, role]
@@ -220,9 +252,17 @@ async function createAgentTask() {
     providers: Object.fromEntries(
       selectedRoles.value.map((role) => [role, roleProviders.value[role] || 'auto']),
     ),
+    workspaceMode: workspace.activeProject?.isGitRepository ? taskWorkspaceMode.value : 'current',
+    baseBranch: taskBaseBranch.value,
+    taskBranch: taskBranch.value,
+    approvalMode: taskApprovalMode.value,
+    queueMerge: taskQueueMerge.value,
+    mergeTarget: taskMergeTarget.value,
+    parentTaskId: taskParentId.value,
   })
   taskTitle.value = ''
   taskPrompt.value = ''
+  taskBranch.value = ''
 }
 
 async function openRunThread(threadId?: string) {
@@ -251,6 +291,20 @@ async function restartSelectedTask() {
   )
     return
   await workspace.restartTask(task.id)
+}
+
+async function openRollback(taskId: string) {
+  rollbackTaskId.value = taskId
+  rollbackConfirmation.value = ''
+  workspace.rollbackPreview = null
+  await workspace.previewRollback(taskId)
+}
+
+async function executeRollback() {
+  const task = workspace.agentTasks.find((bundle) => bundle.task.id === rollbackTaskId.value)?.task
+  if (!task) return
+  await workspace.executeRollback(task.id, rollbackConfirmation.value)
+  rollbackTaskId.value = ''
 }
 
 async function proposeMemory() {
@@ -449,17 +503,21 @@ const selectedTaskActivity = computed(() => {
   )
 })
 
+const rollbackRootTask = computed(
+  () => workspace.agentTasks.find((bundle) => bundle.task.id === rollbackTaskId.value)?.task,
+)
+
 function openTaskDetail(taskId: string) {
   selectedTaskId.value = taskId
   selectedTaskTab.value = 'evidence'
   selectedChangePath.value = ''
+  objectiveExpanded.value = false
   const bundle = workspace.agentTasks.find((candidate) => candidate.task.id === taskId)
   selectedArtifactId.value =
     bundle?.artifacts.find((artifact) => artifact.type === 'plan')?.id ??
     bundle?.artifacts[0]?.id ??
     ''
   void workspace.loadCoordination(taskId)
-  void workspace.loadTaskChanges(taskId)
 }
 
 function selectTaskTab(tab: 'evidence' | 'changes' | 'activity') {
@@ -1107,25 +1165,84 @@ function backendOpen(path: string) {
         </section>
 
         <aside class="task-builder">
-          <p class="eyebrow">New workflow</p>
-          <h2>Delegate a task</h2>
-          <label>
-            <span>Project</span>
-            <strong>{{ workspace.activeProject?.name || 'Select a project in Workspace' }}</strong>
-          </label>
-          <label>
-            <span>Task title</span>
-            <input v-model="taskTitle" type="text" placeholder="Optional short title" />
-          </label>
-          <label>
-            <span>Objective</span>
-            <textarea
-              v-model="taskPrompt"
-              rows="7"
-              placeholder="Describe the outcome, constraints, and verification…"
-            />
-          </label>
-          <div>
+          <header class="builder-header">
+            <div>
+              <p class="eyebrow">New workflow</p>
+              <h2>Delegate a task</h2>
+            </div>
+            <span>{{ workspace.activeProject?.name || 'No project' }}</span>
+          </header>
+
+          <section class="builder-section">
+            <div class="builder-section-title"><b>1</b><span>Outcome</span></div>
+            <label>
+              <span>Task title</span>
+              <input v-model="taskTitle" type="text" placeholder="Short, recognizable title" />
+            </label>
+            <label>
+              <span>Objective</span>
+              <textarea
+                v-model="taskPrompt"
+                rows="9"
+                placeholder="Describe the outcome, constraints, acceptance criteria, and verification…"
+              />
+            </label>
+          </section>
+
+          <section v-if="workspace.activeProject?.isGitRepository" class="builder-section">
+            <div class="builder-section-title"><b>2</b><span>Git workspace</span></div>
+            <div class="workspace-choice">
+              <label
+                v-for="option in [
+                  { id: 'new-branch', title: 'New isolated branch', detail: 'Recommended · linked worktree' },
+                  { id: 'existing-branch', title: 'Existing branch', detail: 'Open in a separate worktree' },
+                  { id: 'current', title: 'Current workspace', detail: 'Shared files · no isolation' },
+                ]"
+                :key="option.id"
+                :class="{ active: taskWorkspaceMode === option.id }"
+              >
+                <input
+                  v-model="taskWorkspaceMode"
+                  type="radio"
+                  name="task-workspace"
+                  :value="option.id"
+                />
+                <span><strong>{{ option.title }}</strong><small>{{ option.detail }}</small></span>
+              </label>
+            </div>
+            <div v-if="taskWorkspaceMode !== 'current'" class="builder-two-column">
+              <label>
+                <span>{{ taskWorkspaceMode === 'new-branch' ? 'Base branch' : 'Task branch' }}</span>
+                <select
+                  v-if="taskWorkspaceMode === 'new-branch'"
+                  v-model="taskBaseBranch"
+                >
+                  <option v-for="branch in workspace.projectBranches" :key="branch.name" :value="branch.name">
+                    {{ branch.name }}{{ branch.current ? ' · current' : '' }}
+                  </option>
+                </select>
+                <select v-else v-model="taskBranch">
+                  <option value="">Select branch…</option>
+                  <option v-for="branch in workspace.projectBranches" :key="branch.name" :value="branch.name">
+                    {{ branch.name }}{{ branch.current ? ' · checked out' : '' }}
+                  </option>
+                </select>
+              </label>
+              <label v-if="taskWorkspaceMode === 'new-branch'">
+                <span>New branch name</span>
+                <input v-model="taskBranch" type="text" placeholder="Auto-generated when empty" />
+              </label>
+            </div>
+            <small class="builder-help">
+              Linked worktrees keep task branches checked out simultaneously without switching the
+              project’s main working directory.
+            </small>
+          </section>
+
+          <section class="builder-section">
+            <div class="builder-section-title">
+              <b>{{ workspace.activeProject?.isGitRepository ? 3 : 2 }}</b><span>Execution policy</span>
+            </div>
             <span class="builder-label">Workflow</span>
             <div class="segmented-control builder-segments">
               <button
@@ -1154,12 +1271,27 @@ function backendOpen(path: string) {
                 “Approve next stage”. The implementer starts writing code only after that approval.
               </p>
               <p v-else>
-                All selected roles launch in parallel. Implementer roles may begin editing their
-                isolated worktrees immediately; reviewers produce independent evidence.
+                The planner runs first. After approval, remaining roles launch together and produce
+                independent implementation or review evidence.
               </p>
             </div>
-          </div>
-          <div>
+            <label class="builder-check">
+              <input
+                type="checkbox"
+                :checked="taskApprovalMode === 'auto'"
+                @change="taskApprovalMode = taskApprovalMode === 'auto' ? 'manual' : 'auto'"
+              />
+              <span>
+                <strong>Auto-approve plan</strong>
+                <small>Planner still runs first; implementation starts without waiting.</small>
+              </span>
+            </label>
+          </section>
+
+          <section class="builder-section">
+            <div class="builder-section-title">
+              <b>{{ workspace.activeProject?.isGitRepository ? 4 : 3 }}</b><span>Agent team</span>
+            </div>
             <span class="builder-label">Agent roles</span>
             <div class="role-grid">
               <button
@@ -1167,6 +1299,7 @@ function backendOpen(path: string) {
                 :key="role"
                 type="button"
                 :class="{ active: selectedRoles.includes(role) }"
+                :disabled="role === 'planner'"
                 @click="toggleRole(role)"
               >
                 {{ role }}
@@ -1188,7 +1321,38 @@ function backendOpen(path: string) {
                 </select>
               </label>
             </div>
-          </div>
+          </section>
+
+          <section class="builder-section">
+            <div class="builder-section-title">
+              <b>{{ workspace.activeProject?.isGitRepository ? 5 : 4 }}</b><span>Chain & delivery</span>
+            </div>
+            <label>
+              <span>Depends on task</span>
+              <select v-model="taskParentId">
+                <option value="">No dependency</option>
+                <option v-for="bundle in workspace.agentTasks" :key="bundle.task.id" :value="bundle.task.id">
+                  {{ bundle.task.title }} · {{ bundle.task.status }}
+                </option>
+              </select>
+            </label>
+            <label v-if="workspace.activeProject?.isGitRepository" class="builder-check">
+              <input v-model="taskQueueMerge" type="checkbox" />
+              <span>
+                <strong>Queue merge task when complete</strong>
+                <small>Create an approval-gated merge step after verification.</small>
+              </span>
+            </label>
+            <label v-if="taskQueueMerge && workspace.activeProject?.isGitRepository">
+              <span>Merge target</span>
+              <select v-model="taskMergeTarget">
+                <option v-for="branch in workspace.projectBranches" :key="branch.name" :value="branch.name">
+                  {{ branch.name }}
+                </option>
+              </select>
+            </label>
+          </section>
+
           <div class="router-note">
             <strong>Smart Router</strong>
             <p>
@@ -1202,7 +1366,7 @@ function backendOpen(path: string) {
             :disabled="!workspace.activeProject || !taskPrompt.trim() || !selectedRoles.length"
             @click="createAgentTask"
           >
-            Start agent workflow
+            Create task & run planner
           </button>
         </aside>
       </div>
@@ -1270,8 +1434,17 @@ function backendOpen(path: string) {
           <button type="button" aria-label="Close task detail" @click="selectedTaskId = ''">×</button>
         </header>
 
-        <div class="task-detail-objective">
-          <span>Objective</span>
+        <div class="task-detail-objective" :class="{ expanded: objectiveExpanded }">
+          <div>
+            <span>Objective</span>
+            <button
+              v-if="selectedTask.task.prompt.length > 600"
+              type="button"
+              @click="objectiveExpanded = !objectiveExpanded"
+            >
+              {{ objectiveExpanded ? 'Collapse' : 'Show full prompt' }}
+            </button>
+          </div>
           <p>{{ selectedTask.task.prompt }}</p>
         </div>
 
@@ -1409,6 +1582,10 @@ function backendOpen(path: string) {
                 <p>{{ selectedTask.task.prompt }}</p>
                 <div>
                   <span>{{ selectedTask.task.mode }} workflow</span>
+                  <span>{{ selectedTask.task.approvalMode }} approval</span>
+                  <span>{{ selectedTask.task.workspaceMode }}</span>
+                  <span v-if="selectedTask.task.taskBranch">{{ selectedTask.task.taskBranch }}</span>
+                  <span v-if="selectedTask.task.mergeTarget">merge → {{ selectedTask.task.mergeTarget }}</span>
                   <span>{{ new Date(selectedTask.task.createdAt).toLocaleString() }}</span>
                   <span>{{ selectedTask.runs.length }} configured stages</span>
                 </div>
@@ -1479,7 +1656,70 @@ function backendOpen(path: string) {
             >
               Restart from beginning
             </button>
+            <button
+              v-if="selectedTask.task.status !== 'rolled-back'"
+              class="danger-button"
+              type="button"
+              :disabled="workspace.busy"
+              @click="openRollback(selectedTask.task.id)"
+            >
+              Rollback…
+            </button>
           </div>
+        </footer>
+      </section>
+    </article>
+
+    <article v-if="rollbackTaskId && rollbackRootTask" class="rollback-overlay">
+      <section class="rollback-panel">
+        <header>
+          <div>
+            <p class="eyebrow">Destructive operation</p>
+            <h2>Rollback task chain</h2>
+          </div>
+          <button type="button" @click="rollbackTaskId = ''">×</button>
+        </header>
+        <div class="rollback-warning">
+          <strong>⚠ This cannot be undone automatically.</strong>
+          <p>{{ workspace.rollbackPreview?.warning || 'Calculating rollback impact…' }}</p>
+        </div>
+        <div class="rollback-impact-list">
+          <article
+            v-for="(impact, index) in workspace.rollbackPreview?.tasks ?? []"
+            :key="impact.taskId"
+            :data-ready="impact.canRollback"
+          >
+            <span>{{ index + 1 }}</span>
+            <div>
+              <strong>{{ impact.title }}</strong>
+              <small>
+                {{ impact.branch || impact.workspace }} · {{ impact.changeCount }} changes ·
+                {{ impact.status }}
+              </small>
+              <p v-if="impact.blockReason">{{ impact.blockReason }}</p>
+            </div>
+            <b>{{ impact.canRollback ? 'will rollback' : 'blocked' }}</b>
+          </article>
+        </div>
+        <label>
+          <span>Type the task title to confirm</span>
+          <code>{{ rollbackRootTask.title }}</code>
+          <input v-model="rollbackConfirmation" type="text" autocomplete="off" />
+        </label>
+        <footer>
+          <button type="button" @click="rollbackTaskId = ''">Keep changes</button>
+          <button
+            class="danger-button"
+            type="button"
+            :disabled="
+              workspace.busy ||
+              !workspace.rollbackPreview?.canRollback ||
+              rollbackConfirmation !== rollbackRootTask.title
+            "
+            @click="executeRollback"
+          >
+            Rollback {{ workspace.rollbackPreview?.tasks.length ?? 0 }} task(s)
+          </button>
         </footer>
       </section>
     </article>

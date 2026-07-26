@@ -3,6 +3,7 @@ import type {
   AgentProvider,
   AgentTaskBundle,
   AgentTaskRequest,
+  BranchInfo,
   CoordinationMessage,
   ContextEntry,
   ElicitationRequest,
@@ -17,6 +18,7 @@ import type {
   ProviderModel,
   ProviderUsage,
   RateLimits,
+  RollbackPreview,
   StartupStatus,
   Thread,
   TaskChanges,
@@ -66,6 +68,8 @@ export const backend = {
   stopProviderConsole: (sessionId: string) => app().StopProviderConsole(sessionId),
   logoutProvider: (providerId: string) => app().LogoutProvider(providerId),
   listAgentTasks: (projectId = '') => app().ListAgentTasks(projectId) as Promise<AgentTaskBundle[]>,
+  listProjectBranches: (projectId: string) =>
+    app().ListProjectBranches(projectId) as Promise<BranchInfo[]>,
   createAgentTask: (request: AgentTaskRequest) =>
     app().CreateAgentTask(request) as Promise<AgentTaskBundle>,
   getTaskChanges: (taskId: string) => app().GetTaskChanges(taskId) as Promise<TaskChanges>,
@@ -82,6 +86,10 @@ export const backend = {
     app().RetryAgentTaskRun(taskId, runId),
   cancelAgentTask: (taskId: string) => app().CancelAgentTask(taskId),
   restartAgentTask: (taskId: string) => app().RestartAgentTask(taskId),
+  previewTaskRollback: (taskId: string) =>
+    app().PreviewTaskRollback(taskId) as Promise<RollbackPreview>,
+  executeTaskRollback: (taskId: string, confirmation: string) =>
+    app().ExecuteTaskRollback(taskId, confirmation) as Promise<RollbackPreview>,
   listCoordinationMessages: (taskId: string) =>
     app().ListCoordinationMessages(taskId) as Promise<CoordinationMessage[]>,
   postCoordinationMessage: (taskId: string, message: string) =>

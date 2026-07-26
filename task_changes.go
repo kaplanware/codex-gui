@@ -22,6 +22,7 @@ type taskFileSnapshot struct {
 	Hash       string `json:"hash"`
 	Size       int64  `json:"size"`
 	ModifiedAt string `json:"modifiedAt"`
+	Mode       uint32 `json:"mode"`
 	Content    string `json:"content,omitempty"`
 	Text       bool   `json:"text"`
 }
@@ -90,7 +91,7 @@ func captureTaskFiles(root string) (map[string]taskFileSnapshot, error) {
 		}
 		snapshot := taskFileSnapshot{
 			Hash: hex.EncodeToString(hasher.Sum(nil)), Size: info.Size(),
-			ModifiedAt: info.ModTime().UTC().Format(time.RFC3339Nano),
+			ModifiedAt: info.ModTime().UTC().Format(time.RFC3339Nano), Mode: uint32(info.Mode().Perm()),
 		}
 		if info.Size() <= snapshotContentLimit && info.Size() <= contentBudget {
 			if content, readErr := os.ReadFile(path); readErr == nil && !strings.ContainsRune(string(content), '\x00') {

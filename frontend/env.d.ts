@@ -28,6 +28,7 @@ declare global {
           StopProviderConsole(sessionId: string): Promise<void>
           LogoutProvider(providerId: string): Promise<void>
           ListAgentTasks(projectId: string): Promise<unknown>
+          ListProjectBranches(projectId: string): Promise<unknown>
           CreateAgentTask(request: unknown): Promise<unknown>
           GetTaskChanges(taskId: string): Promise<unknown>
           PreflightProject(projectId: string): Promise<unknown>
@@ -49,6 +50,8 @@ declare global {
           RetryAgentTaskRun(taskId: string, runId: string): Promise<void>
           CancelAgentTask(taskId: string): Promise<void>
           RestartAgentTask(taskId: string): Promise<void>
+          PreviewTaskRollback(taskId: string): Promise<unknown>
+          ExecuteTaskRollback(taskId: string, confirmation: string): Promise<unknown>
           ListCoordinationMessages(taskId: string): Promise<unknown>
           PostCoordinationMessage(
             taskId: string,
